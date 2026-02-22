@@ -879,7 +879,8 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
           const run = session.last_run
           const taskId = session.last_task_id
           setTaskStatus({ status: run.status || 'completed', result: run })
-          if (taskId) setTrackedTaskId(taskId)
+          // Don't re-poll a restored task — it's already complete and the service
+          // may have restarted (in-memory task_runs wiped). Polling would 404 forever.
           setPipelineHistory([
             { id: 1, role: 'assistant', text: '🔄 Last pipeline run restored from session.' },
             {
@@ -956,7 +957,12 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
           setPipelineHistory(prev => [...prev, { id: Date.now(), role: 'assistant', text: `Failed: ${data.error}` }])
           clearInterval(timer); setTrackedTaskId('')
         }
-      } catch {}
+      } catch (err) {
+        // Stop polling if task no longer exists (service restart wiped in-memory store)
+        if (err.message && (err.message.includes('404') || err.message.includes('task not found'))) {
+          clearInterval(timer); setTrackedTaskId('')
+        }
+      }
     }, 1000)
     return () => { cancelled = true; clearInterval(timer) }
   }, [trackedTaskId])
