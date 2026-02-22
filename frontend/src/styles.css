@@ -581,6 +581,114 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .signoffChip.ok { background: #dcfce7; color: #166534; }
 .signoffChip.no { background: #fee2e2; color: #991b1b; }
 
+/* ── Group Chat Discussion ────────────────────────────── */
+.groupDiscussion { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.groupDiscussionCard {
+  padding: 10px 14px; background: #f8fafc; border: 1px solid var(--border);
+  border-radius: 8px; border-left: 3px solid var(--primary);
+}
+.groupDiscussionTeam {
+  display: flex; align-items: center; gap: 6px; font-size: 12px;
+  color: var(--primary); margin-bottom: 4px;
+}
+.groupDiscussionText { font-size: 13px; color: var(--text); line-height: 1.5; }
+.groupPlanCard {
+  padding: 10px 14px; background: #fffbeb; border: 1px solid #fef08a;
+  border-radius: 8px; margin-top: 4px;
+}
+.groupPlanTitle {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  color: #92400e; margin-bottom: 6px;
+}
+.groupPlanStep {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--text2); padding: 3px 0;
+}
+.groupPlanNum {
+  width: 20px; height: 20px; display: inline-flex; align-items: center;
+  justify-content: center; border-radius: 50%; background: #fef3c7;
+  color: #92400e; font-size: 10px; font-weight: 700; flex-shrink: 0;
+}
+
+/* ── Pipeline Completion Summary ──────────────────────── */
+.pipelineSummary {
+  margin-top: 8px; padding: 12px 14px; background: #f0fdf4;
+  border: 1px solid #bbf7d0; border-radius: 10px;
+}
+.pipelineSummaryHeader {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 14px; color: #166534; margin-bottom: 10px;
+}
+.pipelineSummaryTeams {
+  display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px;
+}
+.pipelineSummaryTeam {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text2); padding: 3px 8px;
+  background: white; border-radius: 6px; border: 1px solid #e2e8f0;
+}
+.pipelineSummaryTeamName { font-weight: 500; color: var(--text); }
+.pipelineSummaryStatus {
+  margin-left: auto; font-size: 10px; font-weight: 600;
+  color: #166534; text-transform: uppercase;
+}
+.pipelineSummaryStorage {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text2); padding: 6px 0;
+}
+.pipelineSummaryFiles {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--primary); padding: 4px 0;
+}
+.pipelineSummaryHandoff {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 4px 0;
+}
+.pipelineSummaryHandoff.ok { color: #166534; }
+.pipelineSummaryHandoff.warn { color: #b45309; }
+
+/* ── Memory Bank Detail ───────────────────────────────── */
+.bankDetailList { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; max-height: 400px; overflow-y: auto; }
+.bankDetailItem {
+  padding: 8px 12px; background: #f8fafc; border: 1px solid var(--border);
+  border-radius: 8px; font-size: 12px;
+}
+.bankDetail-knowledge { border-left: 3px solid #7c3aed; }
+.bankDetail-file_index { border-left: 3px solid #059669; }
+.bankDetail-artifact { border-left: 3px solid var(--primary); }
+.bankDetail-chat_user { border-left: 3px solid #94a3b8; }
+.bankDetail-chat_assistant { border-left: 3px solid #0891b2; }
+.bankDetailType {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  color: var(--text3); margin-bottom: 4px;
+}
+.bankDetailContent {
+  font-size: 12px; color: var(--text2); line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+}
+
+/* ── Repo Learned Box ─────────────────────────────────── */
+.repoLearnedBox {
+  margin-top: 10px; padding: 12px 14px; background: #f0fdf4;
+  border: 1px solid #bbf7d0; border-radius: 8px;
+}
+.repoLearnedHeader {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; color: #166534; margin-bottom: 6px;
+}
+.repoLearnedPreview {
+  font-size: 12px; color: var(--text2); line-height: 1.5;
+  margin: 4px 0 8px; white-space: pre-wrap;
+}
+.repoLearnedFiles { display: flex; flex-wrap: wrap; gap: 4px; }
+.repoFileTag {
+  display: inline-flex; padding: 2px 8px; background: #ecfdf5;
+  border: 1px solid #bbf7d0; border-radius: 4px;
+  font-size: 10px; font-family: monospace; color: #059669;
+}
+
 /* Animations */
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin { animation: spin 1s linear infinite; }

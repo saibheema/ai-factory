@@ -5,6 +5,7 @@ import {
   Shield, Activity, ChevronDown, ChevronRight, Zap, Search, LogOut, Plus, Trash2,
   GitBranch, FolderOpen, Cloud, ExternalLink, Monitor, Code2,
   Folder, FileCode, Copy, RefreshCw, GitMerge, Bell, AlertTriangle, CheckSquare,
+  BookOpen, ArrowDownToLine, MessageCircle, FileText, List, Hash,
 } from 'lucide-react'
 import { signInWithGoogle, logOut, onAuthChange, getIdToken } from './firebase'
 
@@ -852,6 +853,14 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   /* Notifications (from self-heal) */
   const [notifications, setNotifications] = useState([])
 
+  /* Repo learning */
+  const [repoLearning, setRepoLearning] = useState(false)
+  const [repoLearned, setRepoLearned] = useState(null)
+
+  /* Memory bank detail */
+  const [bankDetail, setBankDetail] = useState(null)
+  const [bankLoading, setBankLoading] = useState(false)
+
   const messagesEndRef = useRef(null)
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [chatHistory, pipelineHistory, groupHistory, taskStatus])
 
@@ -1099,6 +1108,28 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
     return () => clearInterval(t)
   }, [activeTab, projectId])
 
+  /* ─── Learn Repo ─── */
+  async function learnRepo() {
+    setRepoLearning(true)
+    try {
+      const data = await api(`/api/projects/${projectId}/git/learn`, {
+        method: 'POST', body: JSON.stringify({ branch: 'main' }),
+      })
+      setRepoLearned(data)
+    } catch (e) { setError(e.message) }
+    finally { setRepoLearning(false) }
+  }
+
+  /* ─── Memory Bank Detail ─── */
+  async function loadBankDetail(bankId) {
+    setBankLoading(true)
+    try {
+      const data = await api(`/api/projects/${projectId}/memory-map/${bankId}`)
+      setBankDetail(data)
+    } catch (e) { setError(e.message) }
+    finally { setBankLoading(false) }
+  }
+
   /* ─── Chat ─── */
   async function sendChat(message) {
     setChatHistory(prev => [...prev, { id: Date.now(), role: 'user', text: message }])
@@ -1133,7 +1164,72 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
         <div className="messageAvatar">{isUser ? <User size={18} /> : <Bot size={18} />}</div>
         <div className="messageContent">
           <div className="messageText">{msg.text}</div>
-          {msg.result && <div className="resultBox"><h4>Result</h4><pre>{JSON.stringify(msg.result, null, 2)}</pre></div>}
+          {/* Group chat discussion cards */}
+          {msg.result?.discussion && (
+            <div className="groupDiscussion">
+              {msg.result.discussion.map((d, i) => (
+                <div key={i} className="groupDiscussionCard">
+                  <div className="groupDiscussionTeam">
+                    <Users size={13} />
+                    <strong>{formatTeamName(d.team)}</strong>
+                  </div>
+                  <div className="groupDiscussionText">{d.summary}</div>
+                </div>
+              ))}
+              {msg.result.plan && (
+                <div className="groupPlanCard">
+                  <div className="groupPlanTitle"><List size={13} /> Discussion Plan</div>
+                  {msg.result.plan.map((step, i) => (
+                    <div key={i} className="groupPlanStep">
+                      <span className="groupPlanNum">{i + 1}</span>
+                      <span>{step.replace(/-/g, ' ')}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {/* Pipeline completion summary */}
+          {msg.result && !msg.result.discussion && (
+            <div className="pipelineSummary">
+              <div className="pipelineSummaryHeader">
+                <CheckCircle2 size={15} />
+                <strong>Pipeline Complete</strong>
+              </div>
+              {msg.result.stages && (
+                <div className="pipelineSummaryTeams">
+                  {msg.result.stages.map((s, i) => (
+                    <div key={i} className="pipelineSummaryTeam">
+                      <CheckCircle2 size={12} />
+                      <span className="pipelineSummaryTeamName">{formatTeamName(s.team)}</span>
+                      <span className="pipelineSummaryStatus">{s.status}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {msg.result.storage && (
+                <div className="pipelineSummaryStorage">
+                  {msg.result.storage.type === 'git' ? (
+                    <><GitBranch size={12} /> Pushed to branch: <code>{msg.result.storage.branch}</code></>
+                  ) : msg.result.storage.type === 'gcs' ? (
+                    <><Cloud size={12} /> Stored in Cloud Storage</>
+                  ) : (
+                    <><Database size={12} /> Stored in memory</>
+                  )}
+                </div>
+              )}
+              {msg.result.code_files && Object.keys(msg.result.code_files).length > 0 && (
+                <div className="pipelineSummaryFiles">
+                  <FileCode size={12} /> {Object.values(msg.result.code_files).reduce((a, t) => a + Object.keys(t).length, 0)} code files generated across {Object.keys(msg.result.code_files).length} team{Object.keys(msg.result.code_files).length !== 1 ? 's' : ''}
+                </div>
+              )}
+              {msg.result.overall_handoff_ok !== undefined && (
+                <div className={`pipelineSummaryHandoff ${msg.result.overall_handoff_ok ? 'ok' : 'warn'}`}>
+                  {msg.result.overall_handoff_ok ? <><CheckCircle2 size={12} /> All team handoffs validated</> : <><AlertTriangle size={12} /> Some handoff mismatches detected</>}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     )
@@ -1293,15 +1389,29 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                 <div><h3>Knowledge Graph</h3><p>Artifacts and team outputs for <strong>{projectId}</strong>.</p></div>
                 <button className="primaryBtn" onClick={loadMemoryMap} disabled={loading}>{loading ? <Loader2 size={16} className="spin" /> : 'Refresh'}</button>
               </div>
-              <MemoryGraph data={memoryMap} onNodeClick={node => setSelectedMemoryNode(node)} />
+              <MemoryGraph data={memoryMap} onNodeClick={node => { setSelectedMemoryNode(node); loadBankDetail(node.id) }} />
               {selectedMemoryNode && (
                 <div className="nodeDetail">
                   <div className="nodeDetailHeader">
                     <h4>{selectedMemoryNode.displayName || formatTeamName(selectedMemoryNode.team)}</h4>
-                    <button className="iconBtn" onClick={() => setSelectedMemoryNode(null)}><XCircle size={16} /></button>
+                    <button className="iconBtn" onClick={() => { setSelectedMemoryNode(null); setBankDetail(null) }}><XCircle size={16} /></button>
                   </div>
-                  <p>Bank: <code>{selectedMemoryNode.id}</code></p>
-                  <p>Artifacts: <strong>{selectedMemoryNode.items}</strong></p>
+                  <p>Bank: <code>{selectedMemoryNode.id}</code> · Artifacts: <strong>{selectedMemoryNode.items}</strong></p>
+                  {bankLoading && <div style={{ padding: '12px', textAlign: 'center' }}><Loader2 size={16} className="spin" /></div>}
+                  {bankDetail && !bankLoading && (
+                    <div className="bankDetailList">
+                      {bankDetail.items.map((item, i) => (
+                        <div key={i} className={`bankDetailItem bankDetail-${item.type}`}>
+                          <div className="bankDetailType">
+                            {item.type === 'knowledge' ? <BookOpen size={12} /> : item.type === 'file_index' ? <FileText size={12} /> : item.type === 'artifact' ? <Hash size={12} /> : <MessageCircle size={12} />}
+                            <span>{item.type.replace('_', ' ')}</span>
+                          </div>
+                          <div className="bankDetailContent">{item.content.substring(0, 400)}{item.content.length > 400 ? '...' : ''}</div>
+                        </div>
+                      ))}
+                      {bankDetail.items.length === 0 && <p style={{ color: 'var(--text3)', fontSize: '13px', padding: '8px 0' }}>No items yet for this team.</p>}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1362,20 +1472,43 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                     <div className="cardHeader"><GitBranch size={18} /><h4>Artifact Storage</h4></div>
                     <p className="fieldHint">Choose where pipeline outputs are saved for <strong>{projectId}</strong>. Git mode pushes to your repo. Cloud mode saves to GCS.</p>
                     {gitConfig?.git_url ? (
-                      <div className="gitActiveBox">
-                        <div className="gitActiveInfo">
-                          <GitBranch size={16} />
-                          <div>
-                            <strong>Git Mode Active</strong>
-                            <span className="gitUrlDisplay">{gitConfig.git_url}</span>
-                            {userGitTokenSet
-                              ? <span className="gitTokenBadge"><Key size={11} /> Token ready</span>
-                              : <span className="gitTokenBadge" style={{ background: '#fef3c7', color: '#b45309' }}><Key size={11} /> No token</span>
-                            }
+                      <>
+                        <div className="gitActiveBox">
+                          <div className="gitActiveInfo">
+                            <GitBranch size={16} />
+                            <div>
+                              <strong>Git Mode Active</strong>
+                              <span className="gitUrlDisplay">{gitConfig.git_url}</span>
+                              {userGitTokenSet
+                                ? <span className="gitTokenBadge"><Key size={11} /> Token ready</span>
+                                : <span className="gitTokenBadge" style={{ background: '#fef3c7', color: '#b45309' }}><Key size={11} /> No token</span>
+                              }
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                            <button className="secondaryBtn" onClick={learnRepo} disabled={repoLearning} title="Fetch and analyze existing repo code">
+                              {repoLearning ? <Loader2 size={14} className="spin" /> : <BookOpen size={14} />}
+                              {repoLearning ? 'Learning...' : 'Learn Repo'}
+                            </button>
+                            <button className="dangerBtn" onClick={removeGitConfig}><Trash2 size={14} /> Remove Git</button>
                           </div>
                         </div>
-                        <button className="dangerBtn" onClick={removeGitConfig}><Trash2 size={14} /> Remove Git</button>
-                      </div>
+                        {repoLearned && (
+                          <div className="repoLearnedBox">
+                            <div className="repoLearnedHeader">
+                              <CheckCircle2 size={14} />
+                              <strong>Repo analyzed: {repoLearned.files_analyzed} files</strong>
+                            </div>
+                            <p className="repoLearnedPreview">{repoLearned.notes_preview}</p>
+                            <div className="repoLearnedFiles">
+                              {(repoLearned.file_tree || []).slice(0, 15).map((f, i) => (
+                                <span key={i} className="repoFileTag">{f}</span>
+                              ))}
+                              {(repoLearned.file_tree || []).length > 15 && <span className="repoFileTag">+{repoLearned.file_tree.length - 15} more</span>}
+                            </div>
+                          </div>
+                        )}
+                      </>
                     ) : (
                       <div className="gitSetupForm">
                         <div className="gitSetupInfo"><Cloud size={16} /><span>Currently using <strong>Cloud Storage (GCS)</strong></span></div>

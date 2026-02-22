@@ -89,6 +89,9 @@ metrics = MetricsRegistry()
 incident_notifier = IncidentNotifier()
 groupchat_service_url = os.getenv("GROUPCHAT_SERVICE_URL", "http://groupchat:8002")
 
+# Teams list for knowledge sharing
+ALL_TEAMS = list(phase2_pipeline.teams)
+
 # ═══════════════════════════════════════════════════════════
 #  Lazy-init persistent stores (Firestore / GCS / Git)
 # ═══════════════════════════════════════════════════════════
@@ -398,18 +401,27 @@ def _run_full_pipeline_tracked(
     all_code_files: dict[str, dict[str, str]] = {}   # team → {filename: content}
     outputs: list[TaskResult] = []
 
-    # Existing code context for follow-up runs
-    existing_code_ctx = ""
+    # ── Pre-populate all_code_files with existing code so new output EXTENDS it ──
+    prior_code: dict[str, dict[str, str]] = {}
     if req.existing_code and req.is_followup:
-        parts = []
         for team_name, team_files in req.existing_code.items():
-            for fname, fcontent in (team_files or {}).items():
-                truncated = fcontent[:600] + ("\n... (truncated)" if len(fcontent) > 600 else "")
+            if team_files:
+                prior_code[team_name] = dict(team_files)
+                all_code_files[team_name] = dict(team_files)  # start with existing
+
+    # Build context string for the LLM so it knows what already exists
+    existing_code_ctx = ""
+    if prior_code:
+        parts = []
+        for team_name, team_files in prior_code.items():
+            for fname, fcontent in team_files.items():
+                truncated = fcontent[:1200] + ("\n... (truncated)" if len(fcontent) > 1200 else "")
                 parts.append(f"### {team_name}/{fname}\n{truncated}")
         if parts:
             existing_code_ctx = (
-                "\n\n=== EXISTING PROJECT CODE (modify/extend this, do NOT start from scratch) ===\n"
-                + "\n\n".join(parts[:8])  # cap at 8 files to avoid context overflow
+                "\n\n=== EXISTING PROJECT CODE (modify/extend this, do NOT rewrite from scratch) ==="
+                "\n⚠️ IMPORTANT: You MUST preserve all existing functionality. Only ADD or MODIFY the specific part requested."
+                "\n" + "\n\n".join(parts[:12])
                 + "\n=== END EXISTING CODE ==="
             )
     effective_req = req.requirement + existing_code_ctx
@@ -461,9 +473,11 @@ def _run_full_pipeline_tracked(
             )
 
             artifacts[team] = stage.artifact
-            # Collect code files for preview and git push
+            # Collect code files for preview and git push — MERGE with prior, don't replace
             if stage.code_files:
-                all_code_files[team] = stage.code_files
+                if team not in all_code_files:
+                    all_code_files[team] = {}
+                all_code_files[team].update(stage.code_files)  # new files override, old files kept
             summary = (
                 f"phase2-stage={team} prior={len(prior)} "
                 f"artifact_lines={len(stage.artifact.splitlines())}"
@@ -1222,23 +1236,42 @@ def project_group_chat(
             "decide-next-actions",
         ]
 
-    updates = []
+    # Build context from memory for each participant
+    context_parts = []
+    try:
+        snapshot = _get_firestore().memory_snapshot(user.uid, project_id)
+    except Exception:
+        snapshot = memory.snapshot()
     for p in participants:
-        team_bank = f"team-{p}"
-        node = next(
-            (n for n in mem_map["nodes"] if n.get("id") == team_bank), None
+        bank_items = snapshot.get(f"team-{p}", [])
+        relevant = [i for i in bank_items if isinstance(i, str) and i.startswith(f"{project_id}:")][:3]
+        if relevant:
+            context_parts.append(f"[{p}] " + "; ".join(r.split(":", 1)[-1][:150] for r in relevant))
+
+    # Have each participant contribute via LLM
+    discussion = []
+    for p in participants:
+        prompt = (
+            f"You are the {p.replace('_',' ')} team lead in a group discussion.\n"
+            f"Topic: {body.topic}\n"
+            f"Project: {project_id}\n"
+            f"Context from memory: {'; '.join(context_parts[:3]) or 'No prior context'}\n"
+            f"Previous discussion: {'; '.join(d['summary'][:100] for d in discussion[-3:]) if discussion else 'Starting discussion'}\n\n"
+            f"Provide your team's perspective in 2-3 sentences. Be specific and actionable."
         )
-        item_count = int(node.get("items", 0)) if isinstance(node, dict) else 0
-        updates.append(
-            {"team": p, "status": f"context_items={item_count}", "topic": body.topic}
-        )
+        try:
+            result = llm_runtime.generate(team=p, requirement=prompt, prior_count=0, handoff_to="none")
+            content = result.content if result and result.content else f"{p}: Acknowledged topic '{body.topic}'. Will review and align with team objectives."
+        except Exception:
+            content = f"{p}: Acknowledged topic '{body.topic}'. Will review and align with team objectives."
+        discussion.append({"team": p, "summary": content, "topic": body.topic})
 
     return {
         "project_id": project_id,
         "topic": body.topic,
         "participants": participants,
         "plan": plan,
-        "updates": updates,
+        "discussion": discussion,
     }
 
 
@@ -1255,6 +1288,10 @@ def get_incident_config(
 class MergeRequest(BaseModel):
     source_branch: str
     target_branch: str = "main"
+
+
+class GitLearnRequest(BaseModel):
+    branch: str = "main"
 
 
 @app.get("/api/projects/{project_id}/git/branches")
@@ -1301,6 +1338,132 @@ def merge_git_branch(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ═══════════════════════════════════════════════════════════
+#  GIT LEARN — fetch repo, learn as solution_arch, share knowledge
+# ═══════════════════════════════════════════════════════════
+@app.post("/api/projects/{project_id}/git/learn")
+def learn_git_repo(
+    project_id: str,
+    body: GitLearnRequest,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Fetch repo contents, have solution_arch learn it, store knowledge for all agents."""
+    git_cfg = _get_firestore().get_git_config(user.uid, project_id)
+    if not (git_cfg and git_cfg.get("git_url")):
+        raise HTTPException(status_code=400, detail="No git repository configured")
+    git_token = _get_firestore().get_git_token(user.uid) or ""
+    if not git_token:
+        raise HTTPException(status_code=400, detail="No GitHub PAT")
+
+    files = _get_git().fetch_repo_tree(git_cfg["git_url"], git_token, body.branch)
+    if not files or (len(files) == 1 and files[0]["path"] == "error"):
+        return {"status": "failed", "error": files[0]["content"] if files else "empty"}
+
+    # Build a summary of the repo structure
+    tree_summary = "\n".join(f"  {f['path']} ({f['size']}B)" for f in files[:80])
+    key_contents = "\n\n".join(
+        f"### {f['path']}\n{f['content'][:2000]}"
+        for f in files
+        if f['content'] and not f['content'].startswith('(')
+    )[:12000]
+
+    # Have LLM (solution_arch) analyze and take notes
+    analysis_prompt = (
+        f"You are the Solution Architect studying an existing codebase for project '{project_id}'.\n"
+        f"Analyze the repository and produce structured notes that all team agents can reference.\n\n"
+        f"REPO STRUCTURE:\n{tree_summary}\n\n"
+        f"KEY FILES:\n{key_contents}\n\n"
+        f"Produce notes covering:\n"
+        f"1. TECH STACK: languages, frameworks, libraries\n"
+        f"2. ARCHITECTURE: patterns, folder structure, entry points\n"
+        f"3. KEY COMPONENTS: main modules, their purposes\n"
+        f"4. DATA MODEL: schemas, models, database\n"
+        f"5. API SURFACE: endpoints, routes\n"
+        f"6. BUILD & DEPLOY: scripts, configs, CI/CD\n"
+        f"7. CONVENTIONS: naming, style, patterns to follow\n"
+    )
+    notes = ""
+    try:
+        result = llm_runtime.generate(team="solution_arch", requirement=analysis_prompt, prior_count=0, handoff_to="none")
+        if result and result.content:
+            notes = result.content
+    except Exception:
+        notes = f"Tech stack analysis:\nFiles: {len(files)}\nStructure:\n{tree_summary[:3000]}"
+
+    # Store in memory for ALL teams
+    store = _get_firestore()
+    repo_knowledge = f"{project_id}:repo_knowledge:{notes[:4000]}"
+    for team in ALL_TEAMS:
+        bank_id = f"team-{team}"
+        try:
+            store.retain(user.uid, project_id, bank_id, repo_knowledge)
+        except Exception:
+            pass
+    # Also store file index
+    file_index = f"{project_id}:repo_files:" + ", ".join(f['path'] for f in files[:100])
+    try:
+        store.retain(user.uid, project_id, "team-solution_arch", file_index)
+    except Exception:
+        pass
+
+    return {
+        "status": "learned",
+        "files_analyzed": len(files),
+        "notes_length": len(notes),
+        "notes_preview": notes[:500],
+        "file_tree": [f["path"] for f in files[:60]],
+    }
+
+
+# ═══════════════════════════════════════════════════════════
+#  MEMORY BANK DETAIL — items for a specific team
+# ═══════════════════════════════════════════════════════════
+@app.get("/api/projects/{project_id}/memory-map/{bank_id}")
+def get_memory_bank_detail(
+    project_id: str,
+    bank_id: str,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Return the actual items stored in a memory bank for display."""
+    try:
+        store = _get_firestore()
+        items = store.recall(user.uid, project_id, bank_id, limit=50)
+    except Exception:
+        try:
+            snapshot = memory.snapshot()
+            items = snapshot.get(bank_id, [])
+        except Exception:
+            items = []
+    # Parse items into structured entries
+    entries = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        # Items are stored as "project_id:summary:artifact_preview"
+        parts = item.split(":", 2)
+        pid = parts[0] if len(parts) > 0 else ""
+        if pid != project_id:
+            continue
+        rest = parts[1] + (":" + parts[2] if len(parts) > 2 else "") if len(parts) > 1 else item
+        # Categorize
+        if rest.startswith("repo_knowledge:"):
+            entries.append({"type": "knowledge", "content": rest[len("repo_knowledge:"):]})
+        elif rest.startswith("repo_files:"):
+            entries.append({"type": "file_index", "content": rest[len("repo_files:"):]})
+        elif rest.startswith("user:"):
+            entries.append({"type": "chat_user", "content": rest[len("user:"):]})
+        elif rest.startswith("assistant:"):
+            entries.append({"type": "chat_assistant", "content": rest[len("assistant:"):]})
+        else:
+            entries.append({"type": "artifact", "content": rest})
+    return {
+        "project_id": project_id,
+        "bank_id": bank_id,
+        "total": len(entries),
+        "items": entries,
+    }
 
 
 # ═══════════════════════════════════════════════════════════

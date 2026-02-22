@@ -64,12 +64,26 @@ def answer_project_question(
     top = matches[:top_k]
 
     if not top:
-        # Still try LLM with no context — it can answer general questions
-        answer = _call_llm(question, "No project memory available yet. Pipeline has not been run for this project.")
+        # Still try LLM but with any available broad context
+        all_context = []
+        for bank_id, items in memory_snapshot.items():
+            for item in items[:3]:
+                if isinstance(item, str):
+                    all_context.append(f"[{bank_id}] {item[:300]}")
+        broad = "\n".join(all_context[:15]) if all_context else "No project memory available yet. Pipeline has not been run for this project."
+        answer = _call_llm(question, broad)
         return answer, []
 
-    # Build context from top matches — prefer items that look like real artifacts
+    # Build context from top matches + include repo knowledge and recent artifacts
     context_parts = []
+    # First add repo knowledge if any
+    for bank_id, items in memory_snapshot.items():
+        for item in items:
+            if isinstance(item, str) and ":repo_knowledge:" in item:
+                context_parts.append(f"[Repository Knowledge]\n{item.split(':repo_knowledge:', 1)[-1][:2000]}")
+                break
+        if context_parts:
+            break
     for m in top:
         label = m.bank_id.replace("_", " ").replace("-", " ")
         context_parts.append(f"[{label}]\n{m.snippet}")

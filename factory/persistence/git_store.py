@@ -23,6 +23,47 @@ _GIT_NONINTERACTIVE_ENV = {
 class GitArtifactStore:
     """Push pipeline artifacts to a user's Git repository."""
 
+    def fetch_repo_tree(self, git_url: str, git_token: str, branch: str = "main", max_files: int = 60) -> list[dict]:
+        """Fetch the repo file tree + contents of key files for learning."""
+        try:
+            tree_raw = self._github(git_url, git_token, "GET", f"git/trees/{branch}?recursive=1")
+            tree = tree_raw.get("tree", []) if isinstance(tree_raw, dict) else []
+            # Filter to code files, skip binaries/images/node_modules
+            _SKIP = {'.png','.jpg','.jpeg','.gif','.ico','.svg','.woff','.woff2','.ttf','.eot','.mp4','.zip','.gz','.tar','.lock'}
+            _SKIP_DIRS = {'node_modules/', '.git/', 'dist/', 'build/', '__pycache__/', '.next/', 'vendor/'}
+            files = []
+            for item in tree:
+                if item.get('type') != 'blob':
+                    continue
+                path = item.get('path', '')
+                if any(path.startswith(d) or f'/{d}' in path for d in _SKIP_DIRS):
+                    continue
+                ext = '.' + path.rsplit('.', 1)[-1] if '.' in path else ''
+                if ext.lower() in _SKIP:
+                    continue
+                files.append({'path': path, 'sha': item.get('sha', ''), 'size': item.get('size', 0)})
+            # Fetch content of key files (README, package.json, main source, etc.)
+            results = []
+            fetched = 0
+            for f in sorted(files, key=lambda x: (0 if x['path'].lower() in ('readme.md','package.json','pyproject.toml','requirements.txt','dockerfile') else 1, x['size'])):
+                if fetched >= max_files:
+                    break
+                if f['size'] > 50000:  # skip very large files
+                    results.append({'path': f['path'], 'content': f'(file too large: {f["size"]} bytes)', 'size': f['size']})
+                    fetched += 1
+                    continue
+                try:
+                    blob = self._github(git_url, git_token, "GET", f"git/blobs/{f['sha']}")
+                    import base64
+                    content = base64.b64decode(blob.get('content', '')).decode('utf-8', errors='replace') if blob.get('encoding') == 'base64' else blob.get('content', '')
+                    results.append({'path': f['path'], 'content': content[:8000], 'size': f['size']})
+                except Exception:
+                    results.append({'path': f['path'], 'content': '(fetch failed)', 'size': f['size']})
+                fetched += 1
+            return results
+        except Exception as exc:
+            return [{'path': 'error', 'content': str(exc), 'size': 0}]
+
     def push_artifacts(
         self,
         git_url: str,
