@@ -191,7 +191,14 @@ class ProjectCreateRequest(BaseModel):
 
 class GitConfigRequest(BaseModel):
     git_url: str = Field(min_length=5)
-    git_token: str | None = None
+
+
+class UserGitTokenRequest(BaseModel):
+    token: str = Field(min_length=1)
+
+
+class UserGitTokenRequest(BaseModel):
+    token: str = Field(min_length=1)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -361,7 +368,7 @@ def _run_full_pipeline_tracked(
         git_cfg = _get_firestore().get_git_config(uid, req.project_id)
         if git_cfg and git_cfg.get("git_url"):
             _git_url = git_cfg["git_url"]
-            _git_token = _get_firestore().get_git_token(uid, req.project_id) or ""
+            _git_token = _get_firestore().get_git_token(uid) or ""  # user-level PAT
     except Exception:
         pass
 
@@ -641,13 +648,11 @@ def set_git_config(
     user: AuthUser = Depends(get_current_user),
 ) -> dict:
     _get_firestore().upsert_project(user.uid, project_id)
-    _get_firestore().save_git_config(
-        user.uid, project_id, body.git_url, body.git_token or ""
-    )
+    _get_firestore().save_git_config(user.uid, project_id, body.git_url)
     return {
         "status": "saved",
         "git_url": body.git_url,
-        "git_token_set": bool(body.git_token),
+        "git_token_set": _get_firestore().user_git_token_set(user.uid),
     }
 
 
@@ -657,6 +662,30 @@ def remove_git_config(
 ) -> dict:
     _get_firestore().save_git_config(user.uid, project_id, "", "")
     return {"status": "removed"}
+
+
+# ═══════════════════════════════════════════════════════════
+#  USER GIT TOKEN — stored once, used across all projects
+# ═══════════════════════════════════════════════════════════
+@app.get("/api/user/git-token")
+def get_user_git_token(user: AuthUser = Depends(get_current_user)) -> dict:
+    token_set = _get_firestore().user_git_token_set(user.uid)
+    return {"token_set": token_set}
+
+
+@app.put("/api/user/git-token")
+def set_user_git_token(
+    body: UserGitTokenRequest,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    _get_firestore().save_user_git_token(user.uid, body.token.strip())
+    return {"status": "saved", "token_set": True}
+
+
+@app.delete("/api/user/git-token")
+def delete_user_git_token(user: AuthUser = Depends(get_current_user)) -> dict:
+    _get_firestore().delete_user_git_token(user.uid)
+    return {"status": "removed", "token_set": False}
 
 
 # ═══════════════════════════════════════════════════════════

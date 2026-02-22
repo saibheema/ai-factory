@@ -703,7 +703,10 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   /* Git config for this project */
   const [gitConfig, setGitConfig] = useState(null)
   const [gitUrl, setGitUrl] = useState('')
-  const [gitToken, setGitToken] = useState('')
+  /* User-level GitHub PAT — stored once, used for all projects */
+  const [userGitTokenSet, setUserGitTokenSet] = useState(false)
+  const [gitPatInput, setGitPatInput] = useState('')
+  const [showPat, setShowPat] = useState(false)
 
   const messagesEndRef = useRef(null)
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [chatHistory, pipelineHistory, groupHistory, taskStatus])
@@ -711,8 +714,11 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   /* Load git config on workspace mount so the storage indicator is correct */
   useEffect(() => {
     api(`/api/projects/${projectId}/git`)
-      .then(gc => { setGitConfig(gc); setGitUrl(gc.git_url || ''); setGitToken('') })
+      .then(gc => { setGitConfig(gc); setGitUrl(gc.git_url || '') })
       .catch(() => setGitConfig(null))
+    api('/api/user/git-token')
+      .then(r => setUserGitTokenSet(r.token_set || false))
+      .catch(() => {})
   }, [projectId])
 
   const navItems = [
@@ -803,14 +809,27 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   async function saveGitConfig() {
     if (!gitUrl.trim()) return
     await handleApi(() => api(`/api/projects/${projectId}/git`, {
-      method: 'PUT', body: JSON.stringify({ git_url: gitUrl.trim(), git_token: gitToken.trim() || null }),
+      method: 'PUT', body: JSON.stringify({ git_url: gitUrl.trim() }),
     }))
     try { const gc = await api(`/api/projects/${projectId}/git`); setGitConfig(gc) } catch {}
   }
 
   async function removeGitConfig() {
     await handleApi(() => api(`/api/projects/${projectId}/git`, { method: 'DELETE' }))
-    setGitConfig(null); setGitUrl(''); setGitToken('')
+    setGitConfig(null); setGitUrl('')
+  }
+
+  async function savePat() {
+    if (!gitPatInput.trim()) return
+    const r = await handleApi(() => api('/api/user/git-token', {
+      method: 'PUT', body: JSON.stringify({ token: gitPatInput.trim() }),
+    }))
+    if (r) { setUserGitTokenSet(true); setGitPatInput(''); setShowPat(false) }
+  }
+
+  async function deletePat() {
+    await handleApi(() => api('/api/user/git-token', { method: 'DELETE' }))
+    setUserGitTokenSet(false)
   }
 
   /* ─── Memory ─── */
@@ -906,7 +925,7 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
           {/* Storage indicator */}
           <div className="storageIndicator">
             {gitConfig?.git_url ? (
-              <><GitBranch size={12} /> <span>Git: {gitConfig.git_url.split('/').pop()?.replace('.git','')}</span></>
+              <><GitBranch size={12} /> <span>Git: {gitConfig.git_url.split('/').pop()?.replace('.git','')}</span>{userGitTokenSet ? null : <span style={{color:'#f59e0b', marginLeft:4}}>⚠ no PAT</span>}</>
             ) : (
               <><Cloud size={12} /> <span>Cloud Storage (GCS)</span></>
             )}
@@ -1021,10 +1040,51 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
               </div>
               {governance && (
                 <div className="settingsLayout">
-                  {/* Git Config Card */}
+                  {/* GitHub PAT — user-level, set once for all projects */}
+                  <div className="card gitCard">
+                    <div className="cardHeader"><Key size={18} /><h4>GitHub Token (PAT)</h4></div>
+                    <p className="fieldHint">Your Personal Access Token — stored once for your account and used across all projects when pushing to GitHub.</p>
+                    {userGitTokenSet ? (
+                      <div className="gitActiveBox">
+                        <div className="gitActiveInfo">
+                          <Key size={16} />
+                          <div>
+                            <strong>Token saved</strong>
+                            <span className="gitUrlDisplay" style={{ color: '#64748b', fontSize: '12px' }}>github.com PAT · applies to all projects</span>
+                          </div>
+                        </div>
+                        <button className="dangerBtn" onClick={deletePat}><Trash2 size={14} /> Remove Token</button>
+                      </div>
+                    ) : (
+                      <div className="gitSetupForm">
+                        <p className="fieldHint" style={{ color: '#f59e0b' }}>⚠ No token set — Git push will fail for private repos.</p>
+                        <p className="fieldHint">Generate at <strong>github.com → Settings → Developer Settings → Personal access tokens</strong>. Needs <code>repo</code> scope.</p>
+                        <div className="fieldRow">
+                          <label className="labelWithIcon"><Key size={14} /> Personal Access Token</label>
+                          <div style={{ display: 'flex', gap: '6px' }}>
+                            <input
+                              type={showPat ? 'text' : 'password'}
+                              value={gitPatInput}
+                              onChange={e => setGitPatInput(e.target.value)}
+                              placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+                              style={{ flex: 1 }}
+                            />
+                            <button className="iconBtn" onClick={() => setShowPat(v => !v)} title="Toggle visibility">
+                              {showPat ? <EyeOff size={14} /> : <Eye size={14} />}
+                            </button>
+                          </div>
+                        </div>
+                        <button className="primaryBtn" onClick={savePat} disabled={!gitPatInput.trim() || loading}>
+                          <Key size={14} /> Save Token
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Git Config Card — repo URL per project */}
                   <div className="card gitCard">
                     <div className="cardHeader"><GitBranch size={18} /><h4>Artifact Storage</h4></div>
-                    <p className="fieldHint">Choose where pipeline outputs are saved. Git mode pushes artifacts to your repository. Cloud mode saves to Google Cloud Storage.</p>
+                    <p className="fieldHint">Choose where pipeline outputs are saved for <strong>{projectId}</strong>. Git mode pushes to your repo. Cloud mode saves to GCS.</p>
                     {gitConfig?.git_url ? (
                       <div className="gitActiveBox">
                         <div className="gitActiveInfo">
@@ -1032,7 +1092,10 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                           <div>
                             <strong>Git Mode Active</strong>
                             <span className="gitUrlDisplay">{gitConfig.git_url}</span>
-                            {gitConfig.git_token_set && <span className="gitTokenBadge"><Key size={11} /> Token set</span>}
+                            {userGitTokenSet
+                              ? <span className="gitTokenBadge"><Key size={11} /> Token ready</span>
+                              : <span className="gitTokenBadge" style={{ background: '#fef3c7', color: '#b45309' }}><Key size={11} /> No token</span>
+                            }
                           </div>
                         </div>
                         <button className="dangerBtn" onClick={removeGitConfig}><Trash2 size={14} /> Remove Git</button>
@@ -1044,10 +1107,9 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                           <label>Git Repository URL</label>
                           <input value={gitUrl} onChange={e => setGitUrl(e.target.value)} placeholder="https://github.com/you/repo.git" />
                         </div>
-                        <div className="fieldRow">
-                          <label className="labelWithIcon"><Key size={14} /> Git Token <span className="labelOptional">(for private repos)</span></label>
-                          <input type="password" value={gitToken} onChange={e => setGitToken(e.target.value)} placeholder="Personal Access Token" />
-                        </div>
+                        {!userGitTokenSet && (
+                          <p className="fieldHint" style={{ color: '#f59e0b' }}>⚠ Save your GitHub Token above first.</p>
+                        )}
                         <button className="primaryBtn" onClick={saveGitConfig} disabled={!gitUrl.trim() || loading}>
                           <GitBranch size={14} /> Enable Git Mode
                         </button>

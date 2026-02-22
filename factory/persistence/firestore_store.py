@@ -4,11 +4,11 @@ Firestore schema
 ================
 users/{uid}
   ├── email, display_name, created_at, last_login
+  ├── config/git_token             — PAT stored once per user (not per project)
   └── projects/{project_id}
-        ├── name, created_at, updated_at, git_url
+        ├── name, created_at, updated_at
         ├── config/team_settings   — per-team model / budget / API-key
-        ├── config/git             — git_url, git_token_set
-        ├── config/git_token       — encrypted token (separate doc)
+        ├── config/git             — git_url, git_token_set (token lives at user level)
         ├── memory/{bank_id}       — items[]
         └── runs/{task_id}         — full pipeline run payload
 """
@@ -139,24 +139,48 @@ class FirestoreStore:
         )
         return [{"id": d.id, **d.to_dict()} for d in query.stream()]
 
-    # ── Git Config ──────────────────────────────────────────
+    # ── User-level Git Token (PAT stored once, applies to all projects) ──
+    def save_user_git_token(self, uid: str, token: str) -> None:
+        """Store the GitHub PAT at the user level — one token for all projects."""
+        ref = self._user_ref(uid).collection("config").document("git_token")
+        ref.set({"token": token, "updated_at": self._now()})
+
+    def get_user_git_token(self, uid: str) -> str:
+        """Retrieve user-level GitHub PAT."""
+        ref = self._user_ref(uid).collection("config").document("git_token")
+        doc = ref.get()
+        return doc.to_dict().get("token", "") if doc.exists else ""
+
+    def delete_user_git_token(self, uid: str) -> None:
+        self._user_ref(uid).collection("config").document("git_token").delete()
+
+    def user_git_token_set(self, uid: str) -> bool:
+        ref = self._user_ref(uid).collection("config").document("git_token")
+        doc = ref.get()
+        return doc.exists and bool(doc.to_dict().get("token"))
+
+    # ── Git Config (URL per-project, token at user level) ───
     def get_git_config(self, uid: str, project_id: str) -> dict | None:
         ref = self._project_ref(uid, project_id).collection("config").document("git")
         doc = ref.get()
-        return doc.to_dict() if doc.exists else None
+        if not doc.exists:
+            return None
+        data = doc.to_dict()
+        # Reflect whether the user-level token is set
+        data["git_token_set"] = self.user_git_token_set(uid)
+        return data
 
     def save_git_config(self, uid: str, project_id: str, git_url: str, git_token: str = "") -> None:
+        """Save URL per-project. If a token is supplied here, promote it to user level."""
         ref = self._project_ref(uid, project_id).collection("config").document("git")
         ref.set({
             "git_url": git_url,
-            "git_token_set": bool(git_token),
             "updated_at": self._now(),
         })
         if git_token:
-            token_ref = self._project_ref(uid, project_id).collection("config").document("git_token")
-            token_ref.set({"token": git_token, "updated_at": self._now()})
+            # Promote to user-level — applies to all projects
+            self.save_user_git_token(uid, git_token)
 
-    def get_git_token(self, uid: str, project_id: str) -> str:
-        ref = self._project_ref(uid, project_id).collection("config").document("git_token")
-        doc = ref.get()
-        return doc.to_dict().get("token", "") if doc.exists else ""
+    def get_git_token(self, uid: str, project_id: str = "") -> str:  # project_id kept for compat
+        """Always return the user-level token."""
+        return self.get_user_git_token(uid)
