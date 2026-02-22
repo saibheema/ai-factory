@@ -152,6 +152,8 @@ def _task_store_load(task_id: str) -> dict | None:
 class RunRequest(BaseModel):
     project_id: str
     requirement: str
+    existing_code: dict | None = None   # {team: {filename: content}} from a prior run
+    is_followup: bool = False
 
 
 class ClarificationCreateRequest(BaseModel):
@@ -357,6 +359,22 @@ def _run_full_pipeline_tracked(
     all_code_files: dict[str, dict[str, str]] = {}   # team → {filename: content}
     outputs: list[TaskResult] = []
 
+    # Existing code context for follow-up runs
+    existing_code_ctx = ""
+    if req.existing_code and req.is_followup:
+        parts = []
+        for team_name, team_files in req.existing_code.items():
+            for fname, fcontent in (team_files or {}).items():
+                truncated = fcontent[:600] + ("\n... (truncated)" if len(fcontent) > 600 else "")
+                parts.append(f"### {team_name}/{fname}\n{truncated}")
+        if parts:
+            existing_code_ctx = (
+                "\n\n=== EXISTING PROJECT CODE (modify/extend this, do NOT start from scratch) ===\n"
+                + "\n\n".join(parts[:8])  # cap at 8 files to avoid context overflow
+                + "\n=== END EXISTING CODE ==="
+            )
+    effective_req = req.requirement + existing_code_ctx
+
     # Resolve git config once for all teams
     _git_url = ""
     _git_token = ""
@@ -393,7 +411,7 @@ def _run_full_pipeline_tracked(
 
             stage = run_phase2_handler(
                 team=team,
-                requirement=req.requirement,
+                requirement=effective_req,
                 prior_count=len(prior),
                 llm_runtime=llm_runtime,
                 uid=uid,

@@ -4,6 +4,7 @@ import {
   CheckCircle2, XCircle, Clock, Bot, User, Key, Eye, EyeOff, Info,
   Shield, Activity, ChevronDown, Zap, Search, LogOut, Plus, Trash2,
   GitBranch, FolderOpen, Cloud, ExternalLink, Monitor, Code2,
+  Folder, FileCode, Copy, RefreshCw,
 } from 'lucide-react'
 import { signInWithGoogle, logOut, onAuthChange, getIdToken } from './firebase'
 
@@ -255,6 +256,32 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
     })
   })
 
+  // Build folder tree for display
+  const buildTree = () => {
+    const tree = {}  // { 'team/dir': { _files: [...], _dirs: {} } }
+    allFiles.forEach(f => {
+      const parts = f.fname.split('/')
+      const dir = parts.length > 1 ? `${f.team}/${parts.slice(0, -1).join('/')}` : f.team
+      if (!tree[dir]) tree[dir] = { label: dir, files: [] }
+      tree[dir].files.push(f)
+    })
+    // Group by team root
+    const teams = {}
+    Object.values(tree).forEach(({ label, files }) => {
+      const teamKey = label.split('/')[0]
+      if (!teams[teamKey]) teams[teamKey] = { dirs: {}, files: [] }
+      const subPath = label.split('/').slice(1).join('/')
+      if (!subPath) {
+        teams[teamKey].files.push(...files)
+      } else {
+        if (!teams[teamKey].dirs[subPath]) teams[teamKey].dirs[subPath] = []
+        teams[teamKey].dirs[subPath].push(...files)
+      }
+    })
+    return teams
+  }
+  const fileTree = buildTree()
+
   // Pick first file by default
   useEffect(() => {
     if (allFiles.length > 0 && !selectedFile) setSelectedFile(allFiles[0].key)
@@ -274,14 +301,80 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
     const inlineStyle = cssMatch ? cssMatch[1] : ''
     const codeWithoutStyle = jsxCode.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
 
-    // Strip ES module syntax — CDN approach (React/ReactDOM loaded as globals)
+    // Strip ES module syntax and markdown fences before handing to Babel
     const cleanCode = codeWithoutStyle
-      .replace(/import\s+type\s+[\s\S]*?;?\n?/g, '')              // import type ...
+      .replace(/^```[a-zA-Z0-9]*\s*\n?/gm, '')            // ``` ```jsx ```tsx etc.
+      .replace(/^```\s*$/gm, '')                           // closing ```
+      .replace(/import\s+type\s+[\s\S]*?;?\n?/g, '')      // import type ...
       .replace(/import\s+[\s\S]*?from\s+['"][^'"]+['"];?\n?/g, '') // import ... from '...'
-      .replace(/import\s+['"][^'"]+['"];?\n?/g, '')                // import '...'
-      .replace(/export\s+default\s+/g, '')                         // export default
-      .replace(/export\s+\{[^}]*\};?\n?/g, '')                    // export { Foo, Bar }
-      .replace(/^export\s+/gm, '')                                 // export function/const
+      .replace(/import\s+['"][^'"]+['"];?\n?/g, '')       // import '...'
+      .replace(/export\s+default\s+/g, '')                // export default
+      .replace(/export\s+\{[^}]*\};?\n?/g, '')            // export { Foo, Bar }
+      .replace(/^export\s+/gm, '')                        // export function/const
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Factory Preview</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; padding: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f8fafc; }
+    #root { max-width: 900px; margin: 0 auto; }
+    ${inlineStyle}
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    /* React/ReactDOM available as globals from CDN */
+    const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+    ${cleanCode}
+
+    /* \u2500\u2500 Mount: typeof checks work in Babel strict mode; eval() does NOT \u2500\u2500 */
+    try {
+      const __comp =
+        typeof App         === 'function' ? App         :
+        typeof Calculator  === 'function' ? Calculator  :
+        typeof TodoApp     === 'function' ? TodoApp     :
+        typeof Main        === 'function' ? Main        :
+        typeof Page        === 'function' ? Page        :
+        typeof Application === 'function' ? Application :
+        typeof Dashboard   === 'function' ? Dashboard   :
+        typeof Component   === 'function' ? Component   :
+        null;
+
+      const __root = ReactDOM.createRoot(document.getElementById('root'));
+      if (__comp) {
+        __root.render(React.createElement(__comp));
+      } else {
+        __root.render(
+          React.createElement('div', { style: { padding: '32px', textAlign: 'center', color: '#64748b' } },
+            React.createElement('h2', null, '\u26a0\ufe0f No Component Found'),
+            React.createElement('p', null, 'Expected a root component named: App, Calculator, Main, Page, Dashboard, etc.'),
+            React.createElement('p', { style: { fontSize: '12px', color: '#94a3b8' } }, 'Check the Code tab for the generated source.')
+          )
+        );
+      }
+    } catch (e) {
+      ReactDOM.createRoot(document.getElementById('root')).render(
+        React.createElement('div', { style: { padding: '32px', color: '#dc2626' } },
+          React.createElement('h2', null, '\u274c Runtime Error'),
+          React.createElement('pre', {
+            style: { background: '#fee2e2', padding: '12px', borderRadius: '6px', fontSize: '12px', whiteSpace: 'pre-wrap', overflowX: 'auto' }
+          }, String(e))
+        )
+      );
+    }
+  </script>
+</body>
+</html>`
+  }
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -429,34 +522,69 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
         )
       )}
 
-      {/* Code browser */}
+      {/* Code browser — folder tree */}
       {status === 'completed' && viewMode === 'code' && (
         <div className="previewCodeLayout">
           <div className="previewFileTree">
-            <div className="previewFileTreeHeader">Files</div>
-            {allFiles.map(f => (
-              <button key={f.key}
-                className={`previewFileBtn ${selectedFile === f.key ? 'active' : ''}`}
-                onClick={() => setSelectedFile(f.key)}>
-                <span className="previewFileTeam">{teamLabel(f.key)}</span>
-                <span className="previewFileName">{f.fname.split('/').pop()}</span>
-              </button>
-            ))}
-            {allFiles.length === 0 && (
+            <div className="previewFileTreeHeader">
+              <FolderOpen size={13} style={{ marginRight: 4 }} />
+              Project Structure
+            </div>
+            {Object.keys(fileTree).length === 0 && (
               <div className="previewNoFiles">No code files yet</div>
             )}
+            {Object.entries(fileTree).map(([teamKey, { dirs, files: rootFiles }]) => (
+              <div key={teamKey} className="previewTreeTeam">
+                {/* Team root folder */}
+                <div className="previewTreeDir previewTreeRoot">
+                  <Folder size={13} style={{ color: '#f59e0b', marginRight: 4, flexShrink: 0 }} />
+                  <span>{teamKey.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}</span>
+                </div>
+                {/* Root-level files */}
+                {rootFiles.map(f => (
+                  <button key={f.key}
+                    className={`previewFileBtn previewFileDepth1 ${selectedFile === f.key ? 'active' : ''}`}
+                    onClick={() => setSelectedFile(f.key)}>
+                    <FileCode size={12} style={{ color: '#64748b', marginRight: 4, flexShrink: 0 }} />
+                    <span className="previewFileName">{f.fname.split('/').pop()}</span>
+                  </button>
+                ))}
+                {/* Sub-directories */}
+                {Object.entries(dirs).map(([dirPath, dirFiles]) => (
+                  <div key={dirPath}>
+                    <div className="previewTreeDir previewFileDepth1">
+                      <Folder size={12} style={{ color: '#f59e0b', marginRight: 4, flexShrink: 0 }} />
+                      <span>{dirPath}</span>
+                    </div>
+                    {dirFiles.map(f => (
+                      <button key={f.key}
+                        className={`previewFileBtn previewFileDepth2 ${selectedFile === f.key ? 'active' : ''}`}
+                        onClick={() => setSelectedFile(f.key)}>
+                        <FileCode size={12} style={{ color: '#64748b', marginRight: 4, flexShrink: 0 }} />
+                        <span className="previewFileName">{f.fname.split('/').pop()}</span>
+                      </button>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ))}
           </div>
           <div className="previewCodePane">
             {currentFile ? (
               <>
                 <div className="previewCodeHeader">
                   <span className="previewCodePath">{currentFile.key}</span>
-                  <span className="previewCodeSize">{currentFile.content.length} chars</span>
+                  <button className="previewCopyBtn" title="Copy" onClick={() => navigator.clipboard?.writeText(currentFile.content)}>
+                    <Copy size={12} />
+                  </button>
                 </div>
                 <pre className="previewCode">{currentFile.content}</pre>
               </>
             ) : (
-              <div className="previewNoFiles" style={{ padding: '32px', textAlign: 'center' }}>Select a file</div>
+              <div className="previewNoFiles" style={{ padding: '32px', textAlign: 'center' }}>
+                <FolderOpen size={32} style={{ color: '#cbd5e1', marginBottom: 8 }} />
+                <p>Select a file from the tree</p>
+              </div>
             )}
           </div>
         </div>
@@ -789,9 +917,21 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
 
   /* ─── Pipeline ─── */
   async function startPipeline(requirement) {
-    setPipelineHistory(prev => [...prev, { id: Date.now(), role: 'user', text: requirement }])
+    const isFollowup = !!(taskStatus?.result?.code_files && Object.keys(taskStatus.result.code_files).length > 0)
+    const body = {
+      project_id: projectId,
+      requirement,
+      ...(isFollowup && {
+        is_followup: true,
+        existing_code: taskStatus.result.code_files,
+      }),
+    }
+    setPipelineHistory(prev => [...prev, {
+      id: Date.now(), role: 'user',
+      text: isFollowup ? `✏️ Follow-up: ${requirement}` : requirement,
+    }])
     const data = await handleApi(() => api('/api/pipelines/full/run/async', {
-      method: 'POST', body: JSON.stringify({ project_id: projectId, requirement }),
+      method: 'POST', body: JSON.stringify(body),
     }))
     if (!data?.task_id) { setPipelineHistory(prev => [...prev, { id: Date.now(), role: 'assistant', text: 'Failed to start.' }]); return }
     setTrackedTaskId(data.task_id)
@@ -1233,9 +1373,22 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
         {/* Input */}
         {['chat','pipeline','group'].includes(activeTab) && (
           <div className="inputArea">
+            {activeTab === 'pipeline' && taskStatus?.result?.code_files && Object.keys(taskStatus.result.code_files).length > 0 && (
+              <div className="followupBanner">
+                <RefreshCw size={12} />
+                <span>Follow-up mode — your next request will extend the existing code</span>
+              </div>
+            )}
             <form onSubmit={handleSubmit} className="inputForm">
               <input type="text" value={inputMessage} onChange={e => setInputMessage(e.target.value)}
-                placeholder={activeTab === 'chat' ? 'Ask about the project...' : activeTab === 'pipeline' ? 'Describe a requirement...' : 'Enter a topic...'}
+                placeholder={
+                  activeTab === 'chat' ? 'Ask about the project...' :
+                  activeTab === 'pipeline'
+                    ? (taskStatus?.result?.code_files && Object.keys(taskStatus.result.code_files).length > 0
+                        ? 'Describe a change or fix to apply...'
+                        : 'Describe a requirement to build...')
+                    : 'Enter a topic...'
+                }
                 disabled={loading} />
               <button type="submit" disabled={!inputMessage.trim() || loading} className="sendBtn">
                 {loading ? <Loader2 size={18} className="spin" /> : <Send size={18} />}
