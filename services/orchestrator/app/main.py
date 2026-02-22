@@ -197,10 +197,6 @@ class UserGitTokenRequest(BaseModel):
     token: str = Field(min_length=1)
 
 
-class UserGitTokenRequest(BaseModel):
-    token: str = Field(min_length=1)
-
-
 # ═══════════════════════════════════════════════════════════
 #  Helpers
 # ═══════════════════════════════════════════════════════════
@@ -881,11 +877,9 @@ def project_qa(
 ) -> dict:
     metrics.inc("ai_factory_project_qa_queries_total")
     try:
-        snapshot = {
-            "banks": _get_firestore().memory_snapshot(user.uid, project_id)
-        }
+        snapshot = _get_firestore().memory_snapshot(user.uid, project_id)
     except Exception:
-        snapshot = {"banks": memory.snapshot()}
+        snapshot = memory.snapshot()
     answer, matches = answer_project_question(
         project_id=project_id,
         question=body.question,
@@ -1077,11 +1071,9 @@ def project_chat(
     user: AuthUser = Depends(get_current_user),
 ) -> dict:
     try:
-        snapshot = {
-            "banks": _get_firestore().memory_snapshot(user.uid, project_id)
-        }
+        snapshot = _get_firestore().memory_snapshot(user.uid, project_id)
     except Exception:
-        snapshot = {"banks": memory.snapshot()}
+        snapshot = memory.snapshot()
     answer, matches = answer_project_question(
         project_id=project_id,
         question=body.message,
@@ -1102,6 +1094,45 @@ def project_chat(
         "answer": answer,
         "matches": [m.__dict__ for m in matches],
     }
+
+
+# ═══════════════════════════════════════════════════════════
+#  SESSION RESTORE
+# ═══════════════════════════════════════════════════════════
+@app.get("/api/projects/{project_id}/session")
+def get_project_session(
+    project_id: str,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Return last pipeline run + chat history so the frontend can restore on reload."""
+    result: dict = {"chat_history": [], "last_run": None, "last_task_id": None}
+    try:
+        store = _get_firestore()
+        # ── Chat history ──────────────────────────────────────────
+        bank_id = f"project-chat-{project_id}"
+        try:
+            raw_items = store.recall(user.uid, project_id, bank_id, limit=60)
+        except Exception:
+            raw_items = []
+        for item in raw_items:
+            u_tag = f"{project_id}:user:"
+            a_tag = f"{project_id}:assistant:"
+            if u_tag in item:
+                result["chat_history"].append({"role": "user", "text": item.split(u_tag, 1)[1]})
+            elif a_tag in item:
+                result["chat_history"].append({"role": "assistant", "text": item.split(a_tag, 1)[1]})
+        # ── Last pipeline run ──────────────────────────────────────
+        try:
+            runs = store.list_runs(user.uid, project_id, limit=1)
+            if runs:
+                latest = runs[0]
+                result["last_task_id"] = latest.get("task_id") or latest.get("id")
+                result["last_run"] = latest
+        except Exception:
+            pass
+    except Exception as exc:
+        log.warning("Session restore failed for project %s: %s", project_id, exc)
+    return result
 
 
 # ═══════════════════════════════════════════════════════════

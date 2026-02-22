@@ -743,6 +743,34 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
       .catch(() => {})
   }, [projectId])
 
+  /* Restore session (chat history + last pipeline run) on project load */
+  useEffect(() => {
+    api(`/api/projects/${projectId}/session`)
+      .then(session => {
+        if (session.chat_history && session.chat_history.length > 0) {
+          setChatHistory([
+            { id: 1, role: 'assistant', text: '👋 Welcome back! Previous conversation restored.' },
+            ...session.chat_history.map((m, i) => ({ id: i + 2, role: m.role, text: m.text })),
+          ])
+        }
+        if (session.last_run) {
+          const run = session.last_run
+          const taskId = session.last_task_id
+          setTaskStatus({ status: run.status || 'completed', result: run })
+          if (taskId) setTrackedTaskId(taskId)
+          setPipelineHistory([
+            { id: 1, role: 'assistant', text: '🔄 Last pipeline run restored from session.' },
+            {
+              id: 2, role: 'assistant',
+              text: `✅ **${run.project_id || projectId}** — run \`${taskId}\` restored.`,
+              result: run,
+            },
+          ])
+        }
+      })
+      .catch(() => { /* silently ignore — fresh session */ })
+  }, [projectId])
+
   const navItems = [
     { key: 'chat', label: 'Project Chat', icon: MessageSquare },
     { key: 'pipeline', label: 'Run Pipeline', icon: Play },
@@ -807,7 +835,7 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
     // Also load Git config
     try {
       const gc = await api(`/api/projects/${projectId}/git`)
-      setGitConfig(gc); setGitUrl(gc.git_url || ''); setGitToken('')
+      setGitConfig(gc); setGitUrl(gc.git_url || '')
     } catch { setGitConfig(null) }
   }
 
