@@ -249,39 +249,38 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
 
   const result = taskStatus?.result || {}
   const codeFiles = result.code_files || {}         // {team: {filename: content}}
+  const unifiedCode = result.unified_code || null   // {filename: content} — flat project tree
+  const fileAttribution = result.file_attribution || {} // {filename: team}
   const mdArtifacts = result.artifacts || {}        // {team: metadata-text}
 
-  // Build flat file list for the code tab
+  // Build flat file list — prefer unified tree, fall back to per-team
   const allFiles = []
-  Object.entries(codeFiles).forEach(([team, files]) => {
-    Object.entries(files || {}).forEach(([fname, content]) => {
-      allFiles.push({ team, fname, content, key: `${team}/${fname}` })
+  if (unifiedCode && Object.keys(unifiedCode).length > 0) {
+    Object.entries(unifiedCode).forEach(([fname, content]) => {
+      allFiles.push({ team: fileAttribution[fname] || 'project', fname, content, key: fname })
     })
-  })
+  } else {
+    Object.entries(codeFiles).forEach(([team, files]) => {
+      Object.entries(files || {}).forEach(([fname, content]) => {
+        allFiles.push({ team, fname, content, key: `${team}/${fname}` })
+      })
+    })
+  }
 
-  // Build folder tree for display
+  // Build folder tree for display — unified project structure
   const buildTree = () => {
-    const tree = {}  // { 'team/dir': { _files: [...], _dirs: {} } }
+    const root = { dirs: {}, files: [] }
     allFiles.forEach(f => {
       const parts = f.fname.split('/')
-      const dir = parts.length > 1 ? `${f.team}/${parts.slice(0, -1).join('/')}` : f.team
-      if (!tree[dir]) tree[dir] = { label: dir, files: [] }
-      tree[dir].files.push(f)
-    })
-    // Group by team root
-    const teams = {}
-    Object.values(tree).forEach(({ label, files }) => {
-      const teamKey = label.split('/')[0]
-      if (!teams[teamKey]) teams[teamKey] = { dirs: {}, files: [] }
-      const subPath = label.split('/').slice(1).join('/')
-      if (!subPath) {
-        teams[teamKey].files.push(...files)
+      if (parts.length === 1) {
+        root.files.push(f)
       } else {
-        if (!teams[teamKey].dirs[subPath]) teams[teamKey].dirs[subPath] = []
-        teams[teamKey].dirs[subPath].push(...files)
+        const dirPath = parts.slice(0, -1).join('/')
+        if (!root.dirs[dirPath]) root.dirs[dirPath] = []
+        root.dirs[dirPath].push(f)
       }
     })
-    return teams
+    return root
   }
   const fileTree = buildTree()
 
@@ -311,8 +310,13 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
 
   // ── Build runnable preview document from frontend_eng code ──
   const buildRunnable = () => {
-    const feFiles = codeFiles.frontend_eng || {}
-    const appJsx = feFiles['src/App.jsx'] || feFiles['src/app.jsx'] || feFiles['App.jsx'] || ''
+    // Try unified code first, then fall back to per-team
+    const feFilesLegacy = codeFiles.frontend_eng || {}
+    const appJsxUnified = unifiedCode?.['src/App.jsx'] || unifiedCode?.['src/app.jsx'] || unifiedCode?.['App.jsx'] || ''
+    const appJsx = appJsxUnified || feFilesLegacy['src/App.jsx'] || feFilesLegacy['src/app.jsx'] || feFilesLegacy['App.jsx'] || ''
+    const feFiles = unifiedCode
+      ? Object.fromEntries(Object.entries(unifiedCode).filter(([k]) => k.endsWith('.jsx') || k.endsWith('.js') || k.endsWith('.tsx')))
+      : feFilesLegacy
     const allJsx = Object.values(feFiles).filter(c => c && (c.includes('function ') || c.includes('=>') || c.includes('const '))).join('\n\n')
     const jsxCode = appJsx || allJsx
 
@@ -396,7 +400,10 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
   }
 
   const hasCode = allFiles.length > 0
-  const hasFrontend = !!(codeFiles.frontend_eng && Object.keys(codeFiles.frontend_eng).length > 0)
+  const hasFrontend = !!(
+    (unifiedCode && (unifiedCode['src/App.jsx'] || unifiedCode['src/app.jsx'] || unifiedCode['App.jsx'])) ||
+    (codeFiles.frontend_eng && Object.keys(codeFiles.frontend_eng).length > 0)
+  )
 
   // Team label for code tab
   const teamLabel = (key) => key.split('/')[0].replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
@@ -411,7 +418,7 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
           <span className="previewTitle"><Monitor size={15} /> Live Preview</span>
           {status === 'completed' && (
             <span className="previewMeta">
-              {Object.keys(codeFiles).length} team{Object.keys(codeFiles).length !== 1 ? 's' : ''} · {allFiles.length} file{allFiles.length !== 1 ? 's' : ''}
+              {allFiles.length} file{allFiles.length !== 1 ? 's' : ''}
               {hasFrontend && <span className="previewTag">React App</span>}
             </span>
           )}
@@ -462,7 +469,7 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
       {status === 'completed' && viewMode === 'preview' && (
         hasFrontend ? (
           <iframe
-            key={JSON.stringify(codeFiles.frontend_eng).slice(0, 40)}
+            key={JSON.stringify(unifiedCode || codeFiles.frontend_eng || {}).slice(0, 40)}
             className="previewFrame"
             srcDoc={buildRunnable()}
             sandbox="allow-scripts allow-forms allow-modals allow-popups"
@@ -484,64 +491,52 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
           <div className="vsExplorer">
             <div className="vsExplorerTitle"><FolderOpen size={12} style={{ marginRight: 5 }} />Explorer</div>
             <div className="vsExplorerSection">
-              {Object.keys(fileTree).length === 0
+              {allFiles.length === 0
                 ? <div className="vsEmpty">No code files</div>
-                : Object.entries(fileTree).map(([teamKey, { dirs, files: rootFiles }]) => {
-                    const teamId = `team:${teamKey}`
-                    const teamOpen = !collapsedFolders.has(teamId)
-                    const label = teamKey.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
-                    return (
-                      <div key={teamKey}>
-                        {/* Team-level folder */}
-                        <div className="vsRow vsDepth0 vsFolder" onClick={() => toggleFolder(teamId)}>
-                          <span className="vsChevron">{teamOpen ? <ChevronDown size={12}/> : <ChevronRight size={12}/>}</span>
-                          <Folder size={14} className="vsIcon" style={{ color: teamOpen ? '#dcb67a' : '#c09050', marginRight: 5, flexShrink: 0 }} />
-                          <span className="vsLabel vsLabelFolder">{label}</span>
+                : <>
+                    {/* Root-level files */}
+                    {fileTree.files.map(f => {
+                      const name = f.fname.split('/').pop()
+                      return (
+                        <div key={f.key}
+                          className={`vsRow vsDepth0 vsFile ${selectedFile === f.key ? 'vsActive' : ''}`}
+                          onClick={() => setSelectedFile(f.key)}>
+                          <span className="vsChevron" />
+                          <FileCode size={13} className="vsIcon" style={{ color: fileIconColor(name), marginRight: 5, flexShrink: 0 }} />
+                          <span className="vsLabel">{name}</span>
                         </div>
-                        {teamOpen && (
-                          <>
-                            {rootFiles.map(f => {
-                              const name = f.fname.split('/').pop()
-                              return (
-                                <div key={f.key}
-                                  className={`vsRow vsDepth1 vsFile ${selectedFile === f.key ? 'vsActive' : ''}`}
-                                  onClick={() => setSelectedFile(f.key)}>
-                                  <span className="vsChevron" />
-                                  <FileCode size={13} className="vsIcon" style={{ color: fileIconColor(name), marginRight: 5, flexShrink: 0 }} />
-                                  <span className="vsLabel">{name}</span>
-                                </div>
-                              )
-                            })}
-                            {Object.entries(dirs).map(([dirPath, dirFiles]) => {
-                              const dirId = `dir:${teamKey}/${dirPath}`
-                              const dirOpen = !collapsedFolders.has(dirId)
-                              return (
-                                <div key={dirPath}>
-                                  <div className="vsRow vsDepth1 vsFolder" onClick={() => toggleFolder(dirId)}>
-                                    <span className="vsChevron">{dirOpen ? <ChevronDown size={12}/> : <ChevronRight size={12}/>}</span>
-                                    <Folder size={13} className="vsIcon" style={{ color: '#dcb67a', marginRight: 5, flexShrink: 0 }} />
-                                    <span className="vsLabel vsLabelFolder">{dirPath}</span>
-                                  </div>
-                                  {dirOpen && dirFiles.map(f => {
-                                    const name = f.fname.split('/').pop()
-                                    return (
-                                      <div key={f.key}
-                                        className={`vsRow vsDepth2 vsFile ${selectedFile === f.key ? 'vsActive' : ''}`}
-                                        onClick={() => setSelectedFile(f.key)}>
-                                        <span className="vsChevron" />
-                                        <FileCode size={13} className="vsIcon" style={{ color: fileIconColor(name), marginRight: 5, flexShrink: 0 }} />
-                                        <span className="vsLabel">{name}</span>
-                                      </div>
-                                    )
-                                  })}
-                                </div>
-                              )
-                            })}
-                          </>
-                        )}
-                      </div>
-                    )
-                  })
+                      )
+                    })}
+                    {/* Directory folders */}
+                    {Object.entries(fileTree.dirs).sort(([a],[b]) => a.localeCompare(b)).map(([dirPath, dirFiles]) => {
+                      const dirId = `dir:${dirPath}`
+                      const dirOpen = !collapsedFolders.has(dirId)
+                      return (
+                        <div key={dirPath}>
+                          <div className="vsRow vsDepth0 vsFolder" onClick={() => toggleFolder(dirId)}>
+                            <span className="vsChevron">{dirOpen ? <ChevronDown size={12}/> : <ChevronRight size={12}/>}</span>
+                            <Folder size={14} className="vsIcon" style={{ color: dirOpen ? '#dcb67a' : '#c09050', marginRight: 5, flexShrink: 0 }} />
+                            <span className="vsLabel vsLabelFolder">{dirPath}</span>
+                          </div>
+                          {dirOpen && dirFiles.map(f => {
+                            const name = f.fname.split('/').pop()
+                            return (
+                              <div key={f.key}
+                                className={`vsRow vsDepth1 vsFile ${selectedFile === f.key ? 'vsActive' : ''}`}
+                                onClick={() => setSelectedFile(f.key)}>
+                                <span className="vsChevron" />
+                                <FileCode size={13} className="vsIcon" style={{ color: fileIconColor(name), marginRight: 5, flexShrink: 0 }} />
+                                <span className="vsLabel">{name}</span>
+                                {fileAttribution[f.fname] && (
+                                  <span className="vsTeamBadge">{fileAttribution[f.fname].replace(/_/g, ' ')}</span>
+                                )}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )
+                    })}
+                  </>
               }
             </div>
           </div>
@@ -1210,7 +1205,7 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
               {msg.result.storage && (
                 <div className="pipelineSummaryStorage">
                   {msg.result.storage.type === 'git' ? (
-                    <><GitBranch size={12} /> Pushed to branch: <code>{msg.result.storage.branch}</code></>
+                    <><GitBranch size={12} /> Pushed to branch: <code>{msg.result.storage.code_branch || msg.result.storage.branch}</code></>
                   ) : msg.result.storage.type === 'gcs' ? (
                     <><Cloud size={12} /> Stored in Cloud Storage</>
                   ) : (
@@ -1218,15 +1213,32 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                   )}
                 </div>
               )}
-              {msg.result.code_files && Object.keys(msg.result.code_files).length > 0 && (
+              {msg.result.unified_code && Object.keys(msg.result.unified_code).length > 0 ? (
                 <div className="pipelineSummaryFiles">
-                  <FileCode size={12} /> {Object.values(msg.result.code_files).reduce((a, t) => a + Object.keys(t).length, 0)} code files generated across {Object.keys(msg.result.code_files).length} team{Object.keys(msg.result.code_files).length !== 1 ? 's' : ''}
+                  <FileCode size={12} /> {Object.keys(msg.result.unified_code).length} code files in unified project structure
+                </div>
+              ) : msg.result.code_files && Object.keys(msg.result.code_files).length > 0 && (
+                <div className="pipelineSummaryFiles">
+                  <FileCode size={12} /> {Object.values(msg.result.code_files).reduce((a, t) => a + Object.keys(t).length, 0)} code files generated
                 </div>
               )}
               {msg.result.overall_handoff_ok !== undefined && (
                 <div className={`pipelineSummaryHandoff ${msg.result.overall_handoff_ok ? 'ok' : 'warn'}`}>
                   {msg.result.overall_handoff_ok ? <><CheckCircle2 size={12} /> All team handoffs validated</> : <><AlertTriangle size={12} /> Some handoff mismatches detected</>}
                 </div>
+              )}
+              {msg.result.qa_verdict && msg.result.qa_verdict !== 'N/A' && (
+                <div className={`qaValidationBanner ${msg.result.qa_verdict === 'PASS' ? 'pass' : 'fail'}`}>
+                  {msg.result.qa_verdict === 'PASS'
+                    ? <><CheckCircle2 size={14} /> <strong>QA Validation: PASS</strong> — All code checks passed</>
+                    : <><AlertTriangle size={14} /> <strong>QA Validation: FAIL</strong> — Issues found</>
+                  }
+                </div>
+              )}
+              {msg.result.qa_issues && msg.result.qa_issues.length > 0 && (
+                <ul className="qaIssueList">
+                  {msg.result.qa_issues.map((issue, i) => <li key={i}>{issue}</li>)}
+                </ul>
               )}
             </div>
           )}

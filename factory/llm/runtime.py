@@ -48,13 +48,15 @@ _TEAM_PROMPTS: dict[str, str] = {
         "- Include ALL business logic (calculations, conversions, data, etc.) inline\n"
         "- Modern, clean UI with inline styles or a simple <style> block above the component\n"
         "- For a calculator/converter: implement all the actual math/conversion logic\n"
-        "- Return ONLY the JavaScript/JSX code. No markdown fences, no explanation."
+        "- Return ONLY the raw JavaScript/JSX code.\n"
+        "- ABSOLUTELY NO markdown code fences (```) — no ```javascript, no ```jsx, no ``` at all.\n"
+        "- NO import statements. NO export statements. Just plain function/const declarations."
     ),
     "backend_eng": (
         "You are an expert FastAPI/Python developer. Generate a complete, working FastAPI application for:\n\n"
         "{requirement}\n\n"
         "Include all imports, Pydantic models, and endpoint implementations with real logic (not placeholders). "
-        "Return ONLY Python code."
+        "Return ONLY raw Python code. ABSOLUTELY NO markdown fences (```)."
     ),
     "database_eng": (
         "You are a database engineer. Write the SQL schema (PostgreSQL) for:\n{requirement}\n\n"

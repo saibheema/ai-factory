@@ -400,6 +400,8 @@ def _run_full_pipeline_tracked(
     artifacts: dict[str, str] = {}
     all_code_files: dict[str, dict[str, str]] = {}   # team → {filename: content}
     outputs: list[TaskResult] = []
+    qa_verdict: str = "N/A"
+    qa_issues: list[str] = []
 
     # ── Pre-populate all_code_files with existing code so new output EXTENDS it ──
     prior_code: dict[str, dict[str, str]] = {}
@@ -460,6 +462,13 @@ def _run_full_pipeline_tracked(
                 else memory.recall(bank_id=bank_id, limit=3)
             )
 
+            # Build flat code map for QA validation
+            flat_code = {}
+            if team == "qa_eng":
+                for _t, _files in all_code_files.items():
+                    for _fname, _content in _files.items():
+                        flat_code[_fname] = _content
+
             stage = run_phase2_handler(
                 team=team,
                 requirement=effective_req,
@@ -470,6 +479,7 @@ def _run_full_pipeline_tracked(
                 git_url=_git_url,
                 git_token=_git_token,
                 folder_id=_folder_id,
+                all_code=flat_code or None,
             )
 
             artifacts[team] = stage.artifact
@@ -478,6 +488,12 @@ def _run_full_pipeline_tracked(
                 if team not in all_code_files:
                     all_code_files[team] = {}
                 all_code_files[team].update(stage.code_files)  # new files override, old files kept
+
+            # Capture QA validation results
+            if team == "qa_eng" and stage.qa_verdict:
+                qa_verdict = stage.qa_verdict
+                qa_issues = list(stage.qa_issues)
+
             summary = (
                 f"phase2-stage={team} prior={len(prior)} "
                 f"artifact_lines={len(stage.artifact.splitlines())}"
@@ -535,6 +551,15 @@ def _run_full_pipeline_tracked(
             )
         overall_handoff_ok = all(bool(x["ok"]) for x in handoffs)
 
+        # ── Build unified project structure ──
+        # Merge all team code into one flat file tree, keeping team attribution
+        unified_code: dict[str, str] = {}        # fname → content
+        file_attribution: dict[str, str] = {}    # fname → team
+        for team_name, team_files in all_code_files.items():
+            for fname, content in team_files.items():
+                unified_code[fname] = content
+                file_attribution[fname] = team_name
+
         # ── Persist artifacts (Git or GCS) ──
         storage_info: dict = {"type": "memory_only", "location": ""}
         try:
@@ -551,20 +576,22 @@ def _run_full_pipeline_tracked(
                     artifacts=artifacts,
                 )
                 storage_info = {"type": "git", **result}
-                # Also push code files if any
-                if all_code_files:
-                    for team_name, team_files in all_code_files.items():
-                        try:
-                            from factory.tools.git_tool import push_code_files
-                            push_code_files(
-                                git_url=git_cfg["git_url"],
-                                git_token=git_token,
-                                project_id=req.project_id,
-                                team=team_name,
-                                files=team_files,
-                            )
-                        except Exception as e_code:
-                            log.warning("Code file push failed for %s: %s", team_name, e_code)
+                # Push unified code as a single branch (not per-team)
+                if unified_code:
+                    try:
+                        from factory.tools.git_tool import push_files
+                        push_result = push_files(
+                            git_url=git_cfg["git_url"],
+                            git_token=git_token,
+                            project_id=req.project_id,
+                            branch_suffix=f"task-{task_id[:8]}",
+                            files=unified_code,
+                            commit_message=f"AI Factory: {req.requirement[:80]}",
+                        )
+                        storage_info["code_branch"] = push_result.get("branch", "")
+                        storage_info["files_pushed"] = push_result.get("files_pushed", 0)
+                    except Exception as e_code:
+                        log.warning("Unified code push failed: %s", e_code)
             else:
                 gcs_path = _get_gcs().save_artifacts(
                     uid=uid,
@@ -575,13 +602,12 @@ def _run_full_pipeline_tracked(
                 )
                 storage_info = {"type": "gcs", "location": gcs_path}
                 # Upload code files to GCS too
-                if all_code_files and uid:
+                if unified_code and uid:
                     try:
                         from factory.tools.gcs_tool import upload_artifact
-                        for team_name, team_files in all_code_files.items():
-                            for fname, fcontent in team_files.items():
-                                safe_name = fname.replace("/", "_")
-                                upload_artifact(uid=uid, project_id=req.project_id, team=team_name, filename=safe_name, content=fcontent)
+                        for fname, fcontent in unified_code.items():
+                            safe_name = fname.replace("/", "_")
+                            upload_artifact(uid=uid, project_id=req.project_id, team="unified", filename=safe_name, content=fcontent)
                     except Exception as e_gcs:
                         log.warning("GCS code upload failed: %s", e_gcs)
         except Exception as e:
@@ -593,9 +619,13 @@ def _run_full_pipeline_tracked(
             "phase": 2,
             "stages": [r.model_dump() for r in outputs],
             "artifacts": artifacts,
-            "code_files": all_code_files,  # {team: {filename: content}} — used for live preview
+            "code_files": all_code_files,  # {team: {filename: content}} — kept for attribution
+            "unified_code": unified_code,  # {filename: content} — flat project tree
+            "file_attribution": file_attribution,  # {filename: team}
             "handoffs": handoffs,
             "overall_handoff_ok": overall_handoff_ok,
+            "qa_verdict": qa_verdict,
+            "qa_issues": qa_issues,
             "governance": llm_runtime.governance_snapshot(),
             "storage": storage_info,
         }
