@@ -1,0 +1,78 @@
+model_list:
+  # --- Factory Aliases (bundled, use system GEMINI_API_KEY) ---
+  - model_name: factory/architect
+    litellm_params:
+      model: gemini/gemini-2.0-flash
+
+  - model_name: factory/coder
+    litellm_params:
+      model: gemini/gemini-2.0-flash
+
+  - model_name: factory/fast
+    litellm_params:
+      model: gemini/gemini-2.0-flash
+
+  - model_name: factory/cheap
+    litellm_params:
+      model: gemini/gemini-2.0-flash
+
+  # --- Google Gemini (needs GEMINI_API_KEY) ---
+  - model_name: gemini/gemini-2.0-flash
+    litellm_params:
+      model: gemini/gemini-2.0-flash
+
+  - model_name: gemini/gemini-2.5-pro-preview-06-05
+    litellm_params:
+      model: gemini/gemini-2.5-pro-preview-06-05
+
+  - model_name: gemini/gemini-2.5-flash-preview-05-20
+    litellm_params:
+      model: gemini/gemini-2.5-flash-preview-05-20
+
+  # --- OpenAI (needs OPENAI_API_KEY) ---
+  - model_name: openai/gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+
+  - model_name: openai/gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+
+  - model_name: openai/gpt-4.1
+    litellm_params:
+      model: openai/gpt-4.1
+
+  - model_name: openai/o3-mini
+    litellm_params:
+      model: openai/o3-mini
+
+  # --- Anthropic (needs ANTHROPIC_API_KEY) ---
+  - model_name: anthropic/claude-sonnet-4-20250514
+    litellm_params:
+      model: anthropic/claude-sonnet-4-20250514
+
+  - model_name: anthropic/claude-3-5-haiku-20241022
+    litellm_params:
+      model: anthropic/claude-3-5-haiku-20241022
+
+  # --- AWS Bedrock (needs AWS creds) ---
+  - model_name: bedrock/anthropic.claude-sonnet-4-20250514-v1:0
+    litellm_params:
+      model: bedrock/anthropic.claude-sonnet-4-20250514-v1:0
+
+  - model_name: bedrock/amazon.nova-pro-v1:0
+    litellm_params:
+      model: bedrock/amazon.nova-pro-v1:0
+
+  # --- Azure OpenAI (needs AZURE_API_KEY + AZURE_API_BASE) ---
+  - model_name: azure/gpt-4o
+    litellm_params:
+      model: azure/gpt-4o
+
+  - model_name: azure/gpt-4o-mini
+    litellm_params:
+      model: azure/gpt-4o-mini
+
+general_settings:
+  disable_spend_logs: false
+  request_timeout: 90

@@ -1,0 +1,37 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'services/memory/Dockerfile', '-t', '${_BASE_IMAGE}/memory:${_TAG}', '.']
+  - name: gcr.io/cloud-builders/docker
+    args: ['push', '${_BASE_IMAGE}/memory:${_TAG}']
+
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'services/orchestrator/Dockerfile', '-t', '${_BASE_IMAGE}/orchestrator:${_TAG}', '.']
+  - name: gcr.io/cloud-builders/docker
+    args: ['push', '${_BASE_IMAGE}/orchestrator:${_TAG}']
+
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'services/chat/Dockerfile', '-t', '${_BASE_IMAGE}/chat:${_TAG}', '.']
+  - name: gcr.io/cloud-builders/docker
+    args: ['push', '${_BASE_IMAGE}/chat:${_TAG}']
+
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'services/groupchat/Dockerfile', '-t', '${_BASE_IMAGE}/groupchat:${_TAG}', '.']
+  - name: gcr.io/cloud-builders/docker
+    args: ['push', '${_BASE_IMAGE}/groupchat:${_TAG}']
+
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'services/clarification_responder/Dockerfile', '-t', '${_BASE_IMAGE}/clarification-responder:${_TAG}', '.']
+  - name: gcr.io/cloud-builders/docker
+    args: ['push', '${_BASE_IMAGE}/clarification-responder:${_TAG}']
+
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'frontend/Dockerfile', '-t', '${_BASE_IMAGE}/frontend:${_TAG}', 'frontend']
+  - name: gcr.io/cloud-builders/docker
+    args: ['push', '${_BASE_IMAGE}/frontend:${_TAG}']
+
+substitutions:
+  _BASE_IMAGE: 'us-central1-docker.pkg.dev/unicon-494419/ai-factory'
+  _TAG: 'phase1'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

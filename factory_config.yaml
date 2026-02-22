@@ -1,0 +1,24 @@
+phase: 1
+pipeline:
+  active_teams:
+    - biz_analysis
+    - solution_arch
+    - backend_eng
+    - qa_eng
+    - docs_team
+  max_iter: 5
+  guardrail_max_retries: 3
+  clarification:
+    max_per_task: 3
+    max_hop_depth: 2
+    ttl_seconds: 120
+
+memory:
+  shared_bank_id: factory-shared-world
+  compression_threshold: 0.80
+  team_banks:
+    biz_analysis: team-biz-analysis
+    solution_arch: team-solution-arch
+    backend_eng: team-backend-eng
+    qa_eng: team-qa-eng
+    docs_team: team-docs

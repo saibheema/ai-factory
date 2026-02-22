@@ -1,0 +1,21 @@
+steps:
+  # ── Orchestrator ─────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'services/orchestrator/Dockerfile',
+           '-t', '${_BASE_IMAGE}/orchestrator:${_TAG}', '.']
+  - name: gcr.io/cloud-builders/docker
+    args: ['push', '${_BASE_IMAGE}/orchestrator:${_TAG}']
+
+  # ── Frontend ──────────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'frontend/Dockerfile',
+           '-t', '${_BASE_IMAGE}/frontend:${_TAG}', 'frontend']
+  - name: gcr.io/cloud-builders/docker
+    args: ['push', '${_BASE_IMAGE}/frontend:${_TAG}']
+
+substitutions:
+  _BASE_IMAGE: 'us-central1-docker.pkg.dev/unicon-494419/ai-factory'
+  _TAG: 'release-llm-fix-v1'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

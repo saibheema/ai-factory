@@ -1,0 +1,54 @@
+phase2:
+  status: started
+  teams:
+    - name: product_mgmt
+      role: Product strategy and MVP slicing
+      state: kickoff
+    - name: biz_analysis
+      role: Requirement structuring and acceptance criteria
+      state: active
+    - name: solution_arch
+      role: Architecture and ADRs
+      state: active
+    - name: api_design
+      role: Contract-first API design
+      state: kickoff
+    - name: ux_ui
+      role: UX flows and interface specs
+      state: kickoff
+    - name: frontend_eng
+      role: Frontend implementation
+      state: active
+    - name: backend_eng
+      role: Backend implementation
+      state: active
+    - name: database_eng
+      role: Schema and migration ownership
+      state: kickoff
+    - name: data_eng
+      role: Data pipelines and marts
+      state: kickoff
+    - name: ml_eng
+      role: ML components and evaluation
+      state: kickoff
+    - name: security_eng
+      role: Security controls and scans
+      state: kickoff
+    - name: compliance
+      role: Policy and audit controls
+      state: kickoff
+    - name: devops
+      role: CI/CD and infra automation
+      state: active
+    - name: qa_eng
+      role: Test automation and quality gates
+      state: active
+    - name: sre_ops
+      role: Runtime reliability and incident posture
+      state: kickoff
+    - name: docs_team
+      role: Technical and user documentation
+      state: active
+    - name: feature_eng
+      role: Story-by-story feature delivery
+      state: kickoff

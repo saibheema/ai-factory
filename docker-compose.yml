@@ -1,0 +1,85 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: factory
+      POSTGRES_USER: factory_user
+      POSTGRES_PASSWORD: CHANGEME
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile
+    env_file:
+      - .env.example
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+      - postgres
+      - memory
+
+  chat:
+    build:
+      context: .
+      dockerfile: services/chat/Dockerfile
+    env_file:
+      - .env.example
+    ports:
+      - "8001:8001"
+    depends_on:
+      - orchestrator
+
+  groupchat:
+    build:
+      context: .
+      dockerfile: services/groupchat/Dockerfile
+    ports:
+      - "8002:8002"
+
+  memory:
+    build:
+      context: .
+      dockerfile: services/memory/Dockerfile
+    ports:
+      - "8006:8006"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    depends_on:
+      - orchestrator
+
+  clarification_responder:
+    build:
+      context: .
+      dockerfile: services/clarification_responder/Dockerfile
+    env_file:
+      - .env.example
+    depends_on:
+      - redis
+
+volumes:
+  pg_data:
+  ollama_data:

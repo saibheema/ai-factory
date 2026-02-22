@@ -1,0 +1,51 @@
+name: Preview Deploy
+
+on:
+  pull_request:
+
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Precheck preview secrets
+        id: precheck
+        run: |
+          if [[ -n "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}" && -n "${{ secrets.GCP_SERVICE_ACCOUNT }}" && -n "${{ secrets.GCP_PROJECT_ID }}" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Auth to Google Cloud
+        if: steps.precheck.outputs.enabled == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        if: steps.precheck.outputs.enabled == 'true'
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy preview stack
+        if: steps.precheck.outputs.enabled == 'true'
+        env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          REGION: ${{ secrets.GCP_REGION || 'us-central1' }}
+          TAG: pr-${{ github.event.pull_request.number }}-${{ github.sha }}
+        run: |
+          chmod +x scripts/gcloud_deploy.sh
+          ./scripts/gcloud_deploy.sh
+
+      - name: Preview skipped
+        if: steps.precheck.outputs.enabled != 'true'
+        run: |
+          echo "Preview deploy skipped: configure GCP_WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT, and GCP_PROJECT_ID secrets."

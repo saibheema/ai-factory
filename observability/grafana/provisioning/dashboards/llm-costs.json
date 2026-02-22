@@ -1,0 +1,78 @@
+{
+  "title": "AI Factory Runtime Overview",
+  "tags": ["ai-factory", "runtime"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 2,
+  "refresh": "10s",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Core Pipeline Runs",
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+      "targets": [{"expr": "sum(ai_factory_core_pipeline_runs_total)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Full Pipeline Runs",
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
+      "targets": [{"expr": "sum(ai_factory_full_pipeline_runs_total)", "refId": "B"}]
+    },
+    {
+      "type": "stat",
+      "title": "Full Handoff Success %",
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
+      "targets": [
+        {
+          "expr": "100 * sum(increase(ai_factory_full_pipeline_handoff_ok_total[15m])) / clamp_min(sum(increase(ai_factory_full_pipeline_handoff_ok_total[15m])) + sum(increase(ai_factory_full_pipeline_handoff_fail_total[15m])), 1)",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Pipeline Duration (avg ms)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "targets": [
+        {
+          "expr": "sum(ai_factory_core_pipeline_duration_sum_ms) / clamp_min(sum(ai_factory_core_pipeline_duration_count), 1)",
+          "legendFormat": "core",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(ai_factory_full_pipeline_duration_sum_ms) / clamp_min(sum(ai_factory_full_pipeline_duration_count), 1)",
+          "legendFormat": "full",
+          "refId": "E"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Clarification and QA Throughput",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "targets": [
+        {
+          "expr": "sum(increase(ai_factory_clarification_requests_total[15m]))",
+          "legendFormat": "clarification_requests",
+          "refId": "F"
+        },
+        {
+          "expr": "sum(increase(ai_factory_project_qa_queries_total[15m]))",
+          "legendFormat": "project_qa_queries",
+          "refId": "G"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Incident Notifications (15m)",
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 13},
+      "targets": [
+        {
+          "expr": "sum(increase(ai_factory_incident_notifications_total[15m]))",
+          "refId": "H"
+        }
+      ]
+    }
+  ]
+}
