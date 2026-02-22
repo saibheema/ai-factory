@@ -427,6 +427,160 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 }
 .previewCopyBtn:hover { background: #4a4a5e; }
 
+/* ── Secondary button ─────────────────────────────────── */
+.secondaryBtn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 7px 14px; background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  font-size: 13px; font-weight: 500; cursor: pointer; transition: background .15s;
+}
+.secondaryBtn:hover { background: #f1f5f9; }
+.secondaryBtn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ── Notification bell (sidebar) ──────────────────────── */
+.notifBell {
+  display: flex; align-items: center; gap: 6px; cursor: pointer;
+  padding: 8px 12px; margin: 4px 8px; border-radius: 8px;
+  background: #fef2f2; border: 1px solid #fecaca; color: #dc2626;
+  font-size: 12px; font-weight: 500; transition: background .15s;
+}
+.notifBell:hover { background: #fee2e2; }
+.notifBadge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; background: #dc2626; color: white;
+  border-radius: 50%; font-size: 10px; font-weight: 700; flex-shrink: 0;
+}
+.notifBellLabel { flex: 1; }
+
+/* ── Merge Team ───────────────────────────────────────── */
+.mergeTargetSelect {
+  padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius);
+  font-size: 13px; background: white; cursor: pointer;
+}
+.branchList { display: flex; flex-direction: column; gap: 8px; padding: 0 0 16px; }
+.branchCard {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; background: white; border: 1px solid var(--border);
+  border-radius: 10px; gap: 12px; transition: box-shadow .15s;
+}
+.branchCard:hover { box-shadow: 0 2px 8px rgba(0,0,0,.07); }
+.branchCardAI { border-left: 3px solid var(--primary); }
+.branchCardLeft { min-width: 0; flex: 1; }
+.branchCardRight { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.branchName { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.branchName code { font-size: 13px; color: var(--text); word-break: break-all; }
+.branchBadgeAI {
+  font-size: 10px; padding: 2px 6px; background: #eff6ff; color: var(--primary);
+  border: 1px solid #bfdbfe; border-radius: 4px; white-space: nowrap; font-weight: 600;
+}
+.branchBadgeProt {
+  font-size: 10px; padding: 2px 6px; background: #fef9c3; color: #854d0e;
+  border: 1px solid #fef08a; border-radius: 4px; font-weight: 600;
+}
+.branchMeta { margin-top: 3px; }
+.branchSha { font-size: 11px; font-family: monospace; color: var(--text3); }
+.mergeBtn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 12px; background: var(--primary); color: white;
+  border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;
+  white-space: nowrap; transition: background .15s;
+}
+.mergeBtn:disabled { opacity: .4; cursor: not-allowed; }
+.mergeBtn:not(:disabled):hover { background: #1d4ed8; }
+.mergePill {
+  display: inline-flex; align-items: center; padding: 3px 8px;
+  border-radius: 12px; font-size: 11px; font-weight: 600; white-space: nowrap;
+}
+.mergePill.success { background: #dcfce7; color: #166534; }
+.mergePill.info    { background: #dbeafe; color: #1e40af; }
+.mergePill.fail    { background: #fee2e2; color: #991b1b; }
+
+/* ── Self Heal ────────────────────────────────────────── */
+.healAlert {
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+  background: #fef3c7; border: 1px solid #fde68a; border-radius: 8px;
+  color: #92400e; font-size: 13px; margin-bottom: 12px;
+}
+.healEmpty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 32px; text-align: center; color: var(--text3); gap: 8px;
+}
+.healStatusRow {
+  display: flex; align-items: center; gap: 12px; margin-bottom: 16px;
+  padding: 10px 0; flex-wrap: wrap;
+}
+.healPill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;
+}
+.healPill.running { background: #dcfce7; color: #166534; }
+.healPill.stopped { background: #f1f5f9; color: var(--text2); }
+.healDot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.healPill.running .healDot { animation: pulse 1.5s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+.healSection { margin-bottom: 20px; }
+.healSectionTitle {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .05em; color: var(--text3); margin-bottom: 8px;
+  padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+.healNotif {
+  display: flex; align-items: flex-start; gap: 8px; padding: 8px 12px;
+  border-radius: 8px; font-size: 12px; margin-bottom: 4px;
+}
+.healNotif.success { background: #dcfce7; color: #166534; }
+.healNotif.warn    { background: #fef3c7; color: #92400e; }
+.healNotif.fail    { background: #fee2e2; color: #991b1b; }
+.healErrorRow {
+  display: flex; align-items: baseline; gap: 8px; padding: 5px 8px;
+  font-size: 12px; border-bottom: 1px solid #f1f5f9;
+}
+.healErrLevel { font-size: 10px; font-weight: 700; color: #dc2626; min-width: 40px; }
+.healErrTs { font-size: 10px; color: var(--text3); min-width: 60px; font-family: monospace; }
+.healErrMsg { flex: 1; font-family: monospace; color: var(--text2); word-break: break-all; }
+.healCard {
+  padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px;
+  margin-bottom: 8px; background: white;
+}
+.healApproved { border-left: 3px solid #22c55e; }
+.healRejected { border-left: 3px solid #ef4444; }
+.healPending  { border-left: 3px solid #f59e0b; }
+.healCardHeader {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap;
+}
+.healCardId { font-family: monospace; font-size: 12px; color: var(--text3); }
+.healBadge {
+  font-size: 10px; padding: 2px 6px; background: #f0abfc; color: #701a75;
+  border-radius: 4px; font-weight: 600;
+}
+.healStatusBadge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; padding: 2px 7px; border-radius: 10px; font-weight: 700; text-transform: uppercase;
+}
+.healStatusBadge.approved { background: #dcfce7; color: #166534; }
+.healStatusBadge.rejected { background: #fee2e2; color: #991b1b; }
+.healStatusBadge.analyzing,
+.healStatusBadge.fixing,
+.healStatusBadge.reviewing { background: #fef3c7; color: #92400e; }
+.healStatusBadge.failed { background: #f1f5f9; color: var(--text3); }
+.healCardTs { font-size: 11px; color: var(--text3); margin-left: auto; }
+.healRootCause {
+  font-size: 12px; color: var(--text2); margin: 4px 0; padding: 6px 10px;
+  background: #f8fafc; border-radius: 6px;
+}
+.healMeta { font-size: 11px; color: var(--text3); margin-top: 4px; }
+.healSignoffs {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin-top: 8px; font-size: 12px;
+}
+.signoffChip {
+  display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px;
+  border-radius: 10px; font-size: 11px; font-weight: 500; cursor: help;
+}
+.signoffChip.ok { background: #dcfce7; color: #166534; }
+.signoffChip.no { background: #fee2e2; color: #991b1b; }
+
 /* Animations */
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin { animation: spin 1s linear infinite; }

@@ -4,7 +4,7 @@ import {
   CheckCircle2, XCircle, Clock, Bot, User, Key, Eye, EyeOff, Info,
   Shield, Activity, ChevronDown, ChevronRight, Zap, Search, LogOut, Plus, Trash2,
   GitBranch, FolderOpen, Cloud, ExternalLink, Monitor, Code2,
-  Folder, FileCode, Copy, RefreshCw,
+  Folder, FileCode, Copy, RefreshCw, GitMerge, Bell, AlertTriangle, CheckSquare,
 } from 'lucide-react'
 import { signInWithGoogle, logOut, onAuthChange, getIdToken } from './firebase'
 
@@ -78,6 +78,8 @@ const NAV_DESCRIPTIONS = {
   preview: 'Live code preview of the last pipeline run — like Google AI Studio.',
   memory: 'Interactive knowledge graph of all artifacts.',
   settings: 'Configure AI models, budgets, API keys, and Git.',
+  merge: 'View branches, review AI-generated code, and merge to main or dev.',
+  selfheal: 'Autonomous watchdog: detects errors, runs fixes, collects agent sign-offs.',
 }
 
 const formatTeamName = (key) => {
@@ -835,6 +837,21 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   const [gitPatInput, setGitPatInput] = useState('')
   const [showPat, setShowPat] = useState(false)
 
+  /* Merge Team state */
+  const [branches, setBranches] = useState([])
+  const [branchesLoading, setBranchesLoading] = useState(false)
+  const [branchesError, setBranchesError] = useState('')
+  const [mergeInProgress, setMergeInProgress] = useState('')  // branch name being merged
+  const [mergeResults, setMergeResults] = useState({})  // { branchName: result }
+  const [mergeTarget, setMergeTarget] = useState('main')
+
+  /* Self Heal state */
+  const [healStatus, setHealStatus] = useState(null)
+  const [healLoading, setHealLoading] = useState(false)
+
+  /* Notifications (from self-heal) */
+  const [notifications, setNotifications] = useState([])
+
   const messagesEndRef = useRef(null)
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [chatHistory, pipelineHistory, groupHistory, taskStatus])
 
@@ -881,6 +898,8 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
     { key: 'pipeline', label: 'Run Pipeline', icon: Play },
     { key: 'preview', label: 'Live Preview', icon: Monitor },
     { key: 'group', label: 'Group Chat', icon: Users },
+    { key: 'merge', label: 'Merge Team', icon: GitMerge },
+    { key: 'selfheal', label: 'Self Heal', icon: Activity },
     { key: 'memory', label: 'Memory Map', icon: Database },
     { key: 'settings', label: 'Settings', icon: Settings },
   ]
@@ -1005,6 +1024,75 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
     if (data) setMemoryMap(data)
   }
 
+  /* ─── Merge Team ─── */
+  async function loadBranches() {
+    setBranchesLoading(true); setBranchesError('')
+    try {
+      const data = await api(`/api/projects/${projectId}/git/branches`)
+      if (data.error) { setBranchesError(data.error); setBranches([]) }
+      else setBranches(data.branches || [])
+    } catch (e) { setBranchesError(e?.message || 'Failed to load branches') }
+    finally { setBranchesLoading(false) }
+  }
+
+  async function doMerge(sourceBranch, targetBranch) {
+    setMergeInProgress(sourceBranch)
+    try {
+      const result = await api(`/api/projects/${projectId}/git/merge`, {
+        method: 'POST',
+        body: JSON.stringify({ source_branch: sourceBranch, target_branch: targetBranch }),
+      })
+      setMergeResults(prev => ({ ...prev, [sourceBranch]: result }))
+      if (result.status === 'merged' || result.status === 'already_merged') loadBranches()
+    } catch (e) {
+      setMergeResults(prev => ({ ...prev, [sourceBranch]: { status: 'failed', error: e?.message } }))
+    } finally { setMergeInProgress('') }
+  }
+
+  /* ─── Self Heal ─── */
+  async function loadHealStatus() {
+    try {
+      const data = await api(`/api/projects/${projectId}/selfheal/status`)
+      setHealStatus(data)
+      // Merge new backend notifications into local list
+      if (data.notifications?.length) {
+        setNotifications(prev => {
+          const existing = new Set(prev.map(n => n.msg))
+          const fresh = data.notifications
+            .filter(msg => !existing.has(msg))
+            .map(msg => ({ id: Date.now() + Math.random(), msg, ts: new Date().toISOString() }))
+          return [...prev, ...fresh]
+        })
+      }
+    } catch {}
+  }
+
+  async function startWatcher() {
+    setHealLoading(true)
+    try { await api(`/api/projects/${projectId}/selfheal/start`, { method: 'POST' }) }
+    finally { setHealLoading(false); loadHealStatus() }
+  }
+
+  async function stopWatcher() {
+    setHealLoading(true)
+    try { await api(`/api/projects/${projectId}/selfheal/stop`, { method: 'POST' }) }
+    finally { setHealLoading(false); loadHealStatus() }
+  }
+
+  async function triggerHeal() {
+    setHealLoading(true)
+    try { await api(`/api/projects/${projectId}/selfheal/trigger`, { method: 'POST' }) }
+    finally { setHealLoading(false); loadHealStatus() }
+  }
+
+  // Poll heal status every 15 s when on the selfheal tab
+  useEffect(() => {
+    if (activeTab !== 'selfheal') return
+    loadHealStatus()
+    const t = setInterval(loadHealStatus, 15000)
+    return () => clearInterval(t)
+  }, [activeTab, projectId])
+
   /* ─── Chat ─── */
   async function sendChat(message) {
     setChatHistory(prev => [...prev, { id: Date.now(), role: 'user', text: message }])
@@ -1104,13 +1192,28 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
             const Icon = item.icon
             return (
               <button key={item.key} className={`navBtn ${activeTab === item.key ? 'active' : ''}`}
-                onClick={() => { setActiveTab(item.key); if (item.key === 'settings') loadGovernance(); if (item.key === 'memory') loadMemoryMap() }}
+                onClick={() => {
+                  setActiveTab(item.key)
+                  if (item.key === 'settings') loadGovernance()
+                  if (item.key === 'memory') loadMemoryMap()
+                  if (item.key === 'merge') loadBranches()
+                  if (item.key === 'selfheal') loadHealStatus()
+                }}
                 title={NAV_DESCRIPTIONS[item.key]}>
                 <Icon size={18} />{item.label}
               </button>
             )
           })}
         </nav>
+
+        {/* Notification bell */}
+        {notifications.length > 0 && (
+          <div className="notifBell" onClick={() => setActiveTab('selfheal')}>
+            <Bell size={14} />
+            <span className="notifBadge">{notifications.length}</span>
+            <span className="notifBellLabel">Self-Heal Alerts</span>
+          </div>
+        )}
 
         {/* Live pipeline indicator */}
         {taskStatus?.status === 'running' && (
@@ -1346,6 +1449,173 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
             </div>
           )}
         </div>
+
+        {/* Merge Team */}
+        {activeTab === 'merge' && (
+          <div className="settingsPanel">
+            <div className="settingsHeader">
+              <div><h3>Merge Team</h3><p>Review AI-generated branches and merge to <code>main</code> or <code>dev</code>.</p></div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <select className="mergeTargetSelect" value={mergeTarget} onChange={e => setMergeTarget(e.target.value)}>
+                  <option value="main">→ main</option>
+                  <option value="dev">→ dev</option>
+                  <option value="staging">→ staging</option>
+                </select>
+                <button className="primaryBtn" onClick={loadBranches} disabled={branchesLoading}>
+                  {branchesLoading ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}&nbsp;Refresh
+                </button>
+              </div>
+            </div>
+            {branchesError && <div className="healAlert"><AlertTriangle size={14} /> {branchesError}</div>}
+            {!branchesError && branches.length === 0 && !branchesLoading && (
+              <div className="healEmpty">
+                <GitMerge size={32} style={{ color: '#cbd5e1', marginBottom: 8 }} />
+                <p>No branches found. Configure a Git repository in Settings first.</p>
+              </div>
+            )}
+            <div className="branchList">
+              {branches.map(b => {
+                const result = mergeResults[b.name]
+                const isMerging = mergeInProgress === b.name
+                return (
+                  <div key={b.name} className={`branchCard ${b.is_ai ? 'branchCardAI' : ''}`}>
+                    <div className="branchCardLeft">
+                      <div className="branchName">
+                        {b.is_ai && <span className="branchBadgeAI">🤖 AI</span>}
+                        {b.protected && <span className="branchBadgeProt">🔒</span>}
+                        <code>{b.name}</code>
+                      </div>
+                      {b.sha && <div className="branchMeta"><span className="branchSha">{b.sha}</span></div>}
+                    </div>
+                    <div className="branchCardRight">
+                      {result && (
+                        <span className={`mergePill ${result.status === 'merged' ? 'success' : result.status === 'already_merged' ? 'info' : 'fail'}`}>
+                          {result.status === 'merged' ? '✅ Merged' : result.status === 'already_merged' ? '✔ Up to date' : `❌ ${result.error || 'Failed'}`}
+                        </span>
+                      )}
+                      {!b.protected && (
+                        <button className="mergeBtn" disabled={!!isMerging || !!mergeInProgress} onClick={() => doMerge(b.name, mergeTarget)}>
+                          {isMerging ? <><Loader2 size={12} className="spin" /> Merging…</> : <><GitMerge size={12} /> Merge → {mergeTarget}</>}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Self Heal */}
+        {activeTab === 'selfheal' && (
+          <div className="settingsPanel">
+            <div className="settingsHeader">
+              <div>
+                <h3>Self-Heal Watchdog</h3>
+                <p>Monitors pipeline errors, auto-generates fixes, collects agent sign-offs, and merges to <code>dev</code>.</p>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {healStatus?.running
+                  ? <button className="dangerBtn" onClick={stopWatcher} disabled={healLoading}>
+                      {healLoading ? <Loader2 size={14} className="spin" /> : '⏹ Stop Watchdog'}
+                    </button>
+                  : <button className="primaryBtn" onClick={startWatcher} disabled={healLoading}>
+                      {healLoading ? <Loader2 size={14} className="spin" /> : '▶ Start Watchdog'}
+                    </button>
+                }
+                <button className="secondaryBtn" onClick={triggerHeal} disabled={healLoading} title="Manually trigger self-heal on current errors">
+                  {healLoading ? <Loader2 size={14} className="spin" /> : <><Zap size={14} /> Trigger Now</>}
+                </button>
+                <button className="secondaryBtn" onClick={loadHealStatus}><RefreshCw size={14} /></button>
+              </div>
+            </div>
+
+            <div className="healStatusRow">
+              <span className={`healPill ${healStatus?.running ? 'running' : 'stopped'}`}>
+                <span className="healDot" /> {healStatus?.running ? 'Watchdog Running — polls every 60 s' : 'Watchdog Stopped'}
+              </span>
+              {notifications.length > 0 && (
+                <button className="linkBtn" style={{ color: '#dc2626' }} onClick={() => setNotifications([])}>
+                  Clear {notifications.length} notification{notifications.length !== 1 ? 's' : ''}
+                </button>
+              )}
+            </div>
+
+            {notifications.length > 0 && (
+              <div className="healSection">
+                <div className="healSectionTitle"><Bell size={13} /> Notifications</div>
+                {[...notifications].reverse().map(n => (
+                  <div key={n.id} className={`healNotif ${n.msg.startsWith('✅') ? 'success' : n.msg.startsWith('⚠️') ? 'warn' : 'fail'}`}>
+                    <span>{n.msg}</span>
+                    <button className="iconBtn" style={{ marginLeft: 'auto', color: '#94a3b8' }}
+                      onClick={() => setNotifications(prev => prev.filter(x => x.id !== n.id))}>
+                      <XCircle size={13} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="healSection">
+              <div className="healSectionTitle"><AlertTriangle size={13} /> Recent Errors ({(healStatus?.recent_errors || []).length})</div>
+              {(healStatus?.recent_errors || []).length === 0
+                ? <div className="healEmpty" style={{ padding: '12px 0' }}><CheckSquare size={20} style={{ color: '#22c55e' }} /><span>No errors in buffer</span></div>
+                : [...(healStatus?.recent_errors || [])].reverse().map((e, i) => (
+                  <div key={i} className="healErrorRow">
+                    <span className="healErrLevel">{e.level}</span>
+                    <span className="healErrTs">{new Date(e.ts).toLocaleTimeString()}</span>
+                    <span className="healErrMsg">{e.msg}</span>
+                  </div>
+                ))
+              }
+            </div>
+
+            <div className="healSection">
+              <div className="healSectionTitle"><Activity size={13} /> Heal History ({(healStatus?.history || []).length})</div>
+              {(healStatus?.history || []).length === 0
+                ? <div className="healEmpty" style={{ padding: '12px 0' }}><p>No heal cycles run yet.</p></div>
+                : [...(healStatus?.history || [])].reverse().map(h => {
+                    const isActive = ['analyzing','fixing','reviewing'].includes(h.status)
+                    const n_yes = Object.values(h.signoffs || {}).filter(s => s.approved).length
+                    const n_tot = Object.values(h.signoffs || {}).length
+                    return (
+                      <div key={h.heal_id} className={`healCard ${h.status === 'approved' ? 'healApproved' : h.status === 'rejected' ? 'healRejected' : 'healPending'}`}>
+                        <div className="healCardHeader">
+                          <span className="healCardId">#{h.heal_id}</span>
+                          {h.manual && <span className="healBadge">Manual</span>}
+                          <span className={`healStatusBadge ${h.status}`}>
+                            {isActive ? <><Loader2 size={11} className="spin" /> {h.status}</> : h.status}
+                          </span>
+                          <span className="healCardTs">{h.started_at ? new Date(h.started_at).toLocaleTimeString() : ''}</span>
+                        </div>
+                        {h.analysis?.root_cause && <div className="healRootCause">🔍 {h.analysis.root_cause}</div>}
+                        {h.fix_task_id && <div className="healMeta">Fix task: <code>{h.fix_task_id}</code></div>}
+                        {n_tot > 0 && (
+                          <div className="healSignoffs">
+                            <strong>Signoffs ({n_yes}/{n_tot}):</strong>
+                            {Object.entries(h.signoffs).map(([team, s]) => (
+                              <span key={team} className={`signoffChip ${s.approved ? 'ok' : 'no'}`} title={s.reason}>
+                                {s.approved ? '✅' : '❌'} {team.replace(/_/g, '\u200b')}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {h.merge_result && (
+                          <div className="healMeta">
+                            Merge:&nbsp;
+                            <span className={`mergePill ${h.merge_result.status === 'merged' ? 'success' : h.merge_result.status === 'already_merged' ? 'info' : 'fail'}`}>
+                              {h.merge_result.status}
+                            </span>
+                            {h.merge_result.target && <> → <code>{h.merge_result.target}</code></>}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })
+              }
+            </div>
+          </div>
+        )}
 
         {/* Input */}
         {['chat','pipeline','group'].includes(activeTab) && (

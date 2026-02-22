@@ -115,6 +115,107 @@ class GitArtifactStore:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     # ── internal helpers ─────────────────────────────────────
+    # ── GitHub REST API helpers ───────────────────────────────────────────
+
+    @staticmethod
+    def _parse_github_repo(git_url: str) -> tuple[str, str]:
+        """Return (owner, repo) from a GitHub HTTPS or SSH URL."""
+        import re
+        m = re.search(r'github\.com[:/]([^/]+)/([^/\s]+?)(?:\.git)?$', git_url)
+        if not m:
+            raise ValueError(f"Not a GitHub URL: {git_url}")
+        return m.group(1), m.group(2)
+
+    def _github(self, git_url: str, git_token: str,
+                method: str, endpoint: str,
+                body: dict | None = None) -> dict | list:
+        """Make a GitHub REST API call."""
+        import httpx
+        owner, repo = self._parse_github_repo(git_url)
+        url = f"https://api.github.com/repos/{owner}/{repo}/{endpoint}"
+        headers = {
+            "Authorization": f"Bearer {git_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        with httpx.Client(timeout=15.0) as client:
+            if method == "GET":
+                resp = client.get(url, headers=headers)
+            elif method == "POST":
+                resp = client.post(url, headers=headers, json=body or {})
+            else:
+                raise ValueError(f"Unsupported HTTP method: {method}")
+        resp.raise_for_status()
+        return resp.json() if resp.text else {}
+
+    def list_branches(self, git_url: str, git_token: str) -> list[dict]:
+        """List repo branches with metadata via GitHub API."""
+        try:
+            raw: list = self._github(  # type: ignore[assignment]
+                git_url, git_token, "GET",
+                "branches?per_page=50&protected=false",
+            )
+            branches = []
+            for b in (raw if isinstance(raw, list) else []):
+                name: str = b.get("name", "")
+                sha: str = (b.get("commit") or {}).get("sha", "")
+                branches.append({
+                    "name": name,
+                    "sha": sha[:8] if sha else "",
+                    "full_sha": sha,
+                    "protected": b.get("protected", False),
+                    "is_ai": name.startswith("ai-factory/"),
+                })
+            return branches
+        except Exception as exc:
+            return [{"name": "error", "sha": "", "is_ai": False,
+                     "protected": False, "error": str(exc)}]
+
+    def merge_branch(
+        self,
+        git_url: str,
+        git_token: str,
+        source_branch: str,
+        target_branch: str = "main",
+    ) -> dict:
+        """Merge source_branch into target_branch via GitHub API."""
+        try:
+            result = self._github(
+                git_url, git_token, "POST", "merges",
+                body={
+                    "base": target_branch,
+                    "head": source_branch,
+                    "commit_message":
+                        f"AI Factory: merge '{source_branch}' → '{target_branch}'",
+                },
+            )
+            sha = ""
+            if isinstance(result, dict):
+                sha = (result.get("sha") or "")[:8]
+            return {
+                "status": "merged",
+                "source": source_branch,
+                "target": target_branch,
+                "sha": sha,
+            }
+        except Exception as exc:
+            # GitHub returns 204 when already up-to-date
+            if "204" in str(exc) or "No Content" in str(exc):
+                return {
+                    "status": "already_merged",
+                    "source": source_branch,
+                    "target": target_branch,
+                    "sha": "",
+                }
+            return {
+                "status": "failed",
+                "source": source_branch,
+                "target": target_branch,
+                "error": str(exc),
+            }
+
+    # ── internal helpers ─────────────────────────────────────────────────
+
     @staticmethod
     def _inject_token(url: str, token: str) -> str:
         """Insert a Personal Access Token into an HTTPS git URL."""

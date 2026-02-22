@@ -15,7 +15,7 @@ import logging
 import os
 import threading
 import uuid
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import UTC, datetime
 
 import httpx
@@ -119,6 +119,45 @@ def _get_git():
         from factory.persistence.git_store import GitArtifactStore
         _git = GitArtifactStore()
     return _git
+
+
+# ═══════════════════════════════════════════════════════════
+#  Self-Heal infrastructure
+# ═══════════════════════════════════════════════════════════
+# Circular error buffer — keyed by project_id
+_error_buffer: dict[str, deque] = defaultdict(lambda: deque(maxlen=50))
+_error_buffer_lock = threading.Lock()
+
+# Active watchdog stop-events — keyed by "{uid}:{project_id}"
+_watchers: dict[str, threading.Event] = {}
+_watchers_lock = threading.Lock()
+
+# Heal history — keyed by project_id (last 50 entries)
+_heal_history: dict[str, list] = defaultdict(list)
+_heal_history_lock = threading.Lock()
+
+# Lazy SelfHealAgent
+_self_heal_agent = None
+
+
+def _get_self_heal_agent():
+    global _self_heal_agent
+    if _self_heal_agent is None:
+        from factory.agents.self_heal import SelfHealAgent
+        _self_heal_agent = SelfHealAgent(llm_runtime=llm_runtime)
+    return _self_heal_agent
+
+
+def _push_error(project_id: str, level: str, msg: str) -> None:
+    """Append an error entry to the project error buffer."""
+    entry = {
+        "ts": datetime.now(UTC).isoformat(),
+        "level": level,
+        "msg": msg[:500],
+        "project_id": project_id,
+    }
+    with _error_buffer_lock:
+        _error_buffer[project_id].append(entry)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -556,6 +595,7 @@ def _run_full_pipeline_tracked(
         _task_store_save(task_id, run_state, uid, req.project_id)
 
     except Exception as exc:
+        _push_error(req.project_id, "ERROR", f"Pipeline task {task_id} failed: {exc}")
         with task_runs_lock:
             st = task_runs[task_id]
             st["status"] = "failed"
@@ -1207,3 +1247,307 @@ def get_incident_config(
     user: AuthUser = Depends(get_current_user),
 ) -> dict:
     return incident_notifier.config_snapshot()
+
+
+# ═══════════════════════════════════════════════════════════
+#  MERGE TEAM  — Git branch listing + merge via GitHub API
+# ═══════════════════════════════════════════════════════════
+class MergeRequest(BaseModel):
+    source_branch: str
+    target_branch: str = "main"
+
+
+@app.get("/api/projects/{project_id}/git/branches")
+def list_git_branches(
+    project_id: str,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """List repository branches with metadata."""
+    try:
+        git_cfg = _get_firestore().get_git_config(user.uid, project_id)
+        if not (git_cfg and git_cfg.get("git_url")):
+            return {"branches": [], "error": "No git repository configured for this project"}
+        git_token = _get_firestore().get_git_token(user.uid) or ""
+        if not git_token:
+            return {"branches": [], "error": "No GitHub PAT configured — go to Settings → GitHub Token"}
+        branches = _get_git().list_branches(git_cfg["git_url"], git_token)
+        return {"branches": branches, "git_url": git_cfg["git_url"]}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/projects/{project_id}/git/merge")
+def merge_git_branch(
+    project_id: str,
+    body: MergeRequest,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Merge source_branch into target_branch via GitHub API."""
+    try:
+        git_cfg = _get_firestore().get_git_config(user.uid, project_id)
+        if not (git_cfg and git_cfg.get("git_url")):
+            raise HTTPException(status_code=400, detail="No git repository configured")
+        git_token = _get_firestore().get_git_token(user.uid) or ""
+        if not git_token:
+            raise HTTPException(status_code=400, detail="No GitHub PAT configured")
+        result = _get_git().merge_branch(
+            git_url=git_cfg["git_url"],
+            git_token=git_token,
+            source_branch=body.source_branch,
+            target_branch=body.target_branch,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ═══════════════════════════════════════════════════════════
+#  SELF-HEAL  — error watchdog + auto-fix pipeline
+# ═══════════════════════════════════════════════════════════
+
+def _run_selfheal(heal_entry: dict, project_id: str, uid: str) -> None:
+    """Run one full self-heal cycle: fix pipeline → sign-offs → optional merge."""
+    try:
+        analysis = heal_entry["analysis"]
+        fix_req = RunRequest(
+            project_id=project_id,
+            requirement=f"[SELF-HEAL] {analysis['requirement']}",
+        )
+        fix_task_id = f"heal-{uuid.uuid4()}"
+        heal_entry["fix_task_id"] = fix_task_id
+        heal_entry["status"] = "fixing"
+
+        fix_thread = threading.Thread(
+            target=_run_full_pipeline_tracked,
+            args=(fix_task_id, fix_req, uid),
+            daemon=True,
+        )
+        fix_thread.start()
+        fix_thread.join(timeout=360)  # wait up to 6 min
+
+        fix_run = _task_store_load(fix_task_id) or {}
+        fix_artifact = " ".join(
+            act.get("artifact_preview", "") for act in fix_run.get("activities", [])
+        )
+
+        # Collect sign-offs
+        heal_entry["status"] = "reviewing"
+        agent = _get_self_heal_agent()
+        signoffs = agent.get_agent_signoffs(
+            fix_requirement=analysis["requirement"],
+            fix_artifact=fix_artifact,
+            teams=analysis.get("teams", ["backend_eng", "qa_eng"]),
+        )
+        heal_entry["signoffs"] = signoffs
+        all_approved = all(s["approved"] for s in signoffs.values())
+
+        # Auto-merge to dev if approved and git is configured
+        merge_result = None
+        if all_approved:
+            try:
+                git_cfg = _get_firestore().get_git_config(uid, project_id)
+                if git_cfg and git_cfg.get("git_url"):
+                    token = _get_firestore().get_git_token(uid) or ""
+                    storage = fix_run.get("result", {}).get("storage", {})
+                    fix_branch = storage.get("branch", "")
+                    if fix_branch and token:
+                        merge_result = _get_git().merge_branch(
+                            git_url=git_cfg["git_url"],
+                            git_token=token,
+                            source_branch=fix_branch,
+                            target_branch="dev",
+                        )
+            except Exception as merge_exc:
+                merge_result = {"status": "failed", "error": str(merge_exc)}
+
+        heal_entry["merge_result"] = merge_result
+        heal_entry["status"] = "approved" if all_approved else "rejected"
+        heal_entry["completed_at"] = datetime.now(UTC).isoformat()
+
+        n_approved = sum(1 for s in signoffs.values() if s["approved"])
+        n_total = len(signoffs)
+        merged_ok = (merge_result or {}).get("status") in ("merged", "already_merged")
+        if all_approved:
+            heal_entry["notification"] = (
+                f"✅ Self-heal complete: {analysis.get('root_cause','')[:80]} | "
+                f"Signoffs: {n_approved}/{n_total} | "
+                f"Merged to dev: {'yes' if merged_ok else 'no'}"
+            )
+        else:
+            rejected = [t for t, s in signoffs.items() if not s["approved"]]
+            heal_entry["notification"] = (
+                f"⚠️ Self-heal rejected by: {', '.join(rejected)} | "
+                f"Issue: {analysis.get('root_cause','')[:80]}"
+            )
+    except Exception as exc:
+        log.warning("Self-heal cycle failed for %s: %s", project_id, exc)
+        heal_entry["status"] = "failed"
+        heal_entry["error"] = str(exc)
+        heal_entry["completed_at"] = datetime.now(UTC).isoformat()
+        heal_entry["notification"] = f"❌ Self-heal failed: {exc}"
+
+
+def _watchdog_loop(
+    watcher_key: str, project_id: str, uid: str, stop_event: threading.Event
+) -> None:
+    """Poll error buffer every 60 s; trigger self-heal when new errors appear."""
+    log.info("Watchdog started: %s", watcher_key)
+    while not stop_event.wait(60):
+        try:
+            with _error_buffer_lock:
+                errors = list(_error_buffer[project_id])
+
+            with _heal_history_lock:
+                history = _heal_history[project_id]
+                last_ts = history[-1]["started_at"] if history else "1970-01-01T00:00:00+00:00"
+
+            new_errors = [e for e in errors if e["ts"] > last_ts]
+            if not new_errors:
+                continue
+
+            log.info("Watchdog: %d new errors in %s — triggering self-heal",
+                     len(new_errors), project_id)
+
+            agent = _get_self_heal_agent()
+            analysis = agent.analyze_issue(new_errors, project_id)
+            if not analysis.get("requirement"):
+                continue
+
+            heal_entry = {
+                "heal_id": str(uuid.uuid4())[:8],
+                "project_id": project_id,
+                "started_at": datetime.now(UTC).isoformat(),
+                "status": "analyzing",
+                "errors": new_errors[-5:],
+                "analysis": analysis,
+                "fix_task_id": None,
+                "signoffs": {},
+                "merge_result": None,
+                "completed_at": None,
+                "notification": "",
+                "manual": False,
+            }
+            with _heal_history_lock:
+                _heal_history[project_id].append(heal_entry)
+
+            threading.Thread(
+                target=_run_selfheal,
+                args=(heal_entry, project_id, uid),
+                daemon=True,
+            ).start()
+
+        except Exception as exc:
+            log.warning("Watchdog error for %s: %s", project_id, exc)
+    log.info("Watchdog stopped: %s", watcher_key)
+
+
+@app.post("/api/projects/{project_id}/selfheal/start")
+def start_selfheal_watcher(
+    project_id: str,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Start the background error watchdog for this project."""
+    watcher_key = f"{user.uid}:{project_id}"
+    with _watchers_lock:
+        if watcher_key in _watchers:
+            return {"status": "already_running", "project_id": project_id}
+        stop_event = threading.Event()
+        _watchers[watcher_key] = stop_event
+    threading.Thread(
+        target=_watchdog_loop,
+        args=(watcher_key, project_id, user.uid, stop_event),
+        daemon=True,
+    ).start()
+    return {"status": "started", "project_id": project_id}
+
+
+@app.post("/api/projects/{project_id}/selfheal/stop")
+def stop_selfheal_watcher(
+    project_id: str,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Stop the background error watchdog."""
+    watcher_key = f"{user.uid}:{project_id}"
+    with _watchers_lock:
+        ev = _watchers.pop(watcher_key, None)
+    if ev:
+        ev.set()
+        return {"status": "stopped", "project_id": project_id}
+    return {"status": "not_running", "project_id": project_id}
+
+
+@app.get("/api/projects/{project_id}/selfheal/status")
+def selfheal_status(
+    project_id: str,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Return watchdog state, recent errors, and heal history."""
+    watcher_key = f"{user.uid}:{project_id}"
+    with _watchers_lock:
+        running = watcher_key in _watchers
+    with _heal_history_lock:
+        history = list(_heal_history[project_id])[-20:]
+    with _error_buffer_lock:
+        recent_errors = list(_error_buffer[project_id])[-10:]
+    return {
+        "running": running,
+        "project_id": project_id,
+        "history": history,
+        "recent_errors": recent_errors,
+        "notifications": [
+            h["notification"] for h in history
+            if h.get("notification") and h.get("status") in ("approved", "rejected", "failed")
+        ][-5:],
+    }
+
+
+@app.post("/api/projects/{project_id}/selfheal/trigger")
+def trigger_selfheal_manual(
+    project_id: str,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Manually trigger one self-heal cycle on the current error buffer."""
+    with _error_buffer_lock:
+        errors = list(_error_buffer[project_id])
+    if not errors:
+        return {"status": "no_errors",
+                "message": "Error buffer is empty — no issues to fix"}
+
+    agent = _get_self_heal_agent()
+    analysis = agent.analyze_issue(errors, project_id)
+    if not analysis.get("requirement"):
+        return {"status": "no_fix",
+                "message": "Could not identify a specific fix for current errors"}
+
+    heal_entry = {
+        "heal_id": str(uuid.uuid4())[:8],
+        "project_id": project_id,
+        "started_at": datetime.now(UTC).isoformat(),
+        "status": "analyzing",
+        "errors": errors[-5:],
+        "analysis": analysis,
+        "fix_task_id": None,
+        "signoffs": {},
+        "merge_result": None,
+        "completed_at": None,
+        "notification": "",
+        "manual": True,
+    }
+    with _heal_history_lock:
+        _heal_history[project_id].append(heal_entry)
+
+    threading.Thread(
+        target=_run_selfheal,
+        args=(heal_entry, project_id, user.uid),
+        daemon=True,
+    ).start()
+
+    return {
+        "status": "triggered",
+        "heal_id": heal_entry["heal_id"],
+        "project_id": project_id,
+        "errors_analyzed": len(errors),
+        "analysis": analysis,
+    }
