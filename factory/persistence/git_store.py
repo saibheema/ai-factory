@@ -12,6 +12,14 @@ import tempfile
 from datetime import UTC, datetime
 
 
+# Git env that prevents any interactive prompts (safe for Cloud Run / CI)
+_GIT_NONINTERACTIVE_ENV = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_ASKPASS": "echo",
+    "GCM_INTERACTIVE": "never",
+}
+
+
 class GitArtifactStore:
     """Push pipeline artifacts to a user's Git repository."""
 
@@ -25,14 +33,27 @@ class GitArtifactStore:
         artifacts: dict[str, str],
     ) -> dict:
         """Clone repo, write artifacts, commit, push. Returns status dict."""
+        # Fall back to env-level token if caller didn't supply one
+        if not git_token:
+            git_token = os.environ.get("GITHUB_TOKEN", "")
+
+        if not git_token:
+            return {
+                "status": "failed",
+                "error": (
+                    "No git token available. Set GITHUB_TOKEN env var "
+                    "or pass git_token in the request."
+                ),
+            }
+
         tmpdir = tempfile.mkdtemp(prefix="aifactory-git-")
         try:
             auth_url = self._inject_token(git_url, git_token)
 
-            # Clone (shallow)
+            # Clone (shallow) — use auth URL + non-interactive env
             self._run(["git", "clone", "--depth", "1", auth_url, tmpdir])
 
-            # Re-set remote origin to auth URL so push also works
+            # Re-set remote origin to auth URL so push also uses it
             self._run(["git", "remote", "set-url", "origin", auth_url], cwd=tmpdir)
 
             # Create branch
@@ -45,7 +66,7 @@ class GitArtifactStore:
             os.makedirs(out_dir, exist_ok=True)
 
             # README with summary
-            readme = f"# AI Factory Output\n\n"
+            readme = "# AI Factory Output\n\n"
             readme += f"**Project:** {project_id}  \n"
             readme += f"**Task:** {task_id}  \n"
             readme += f"**Requirement:** {requirement}  \n"
@@ -62,20 +83,25 @@ class GitArtifactStore:
                 with open(path, "w") as f:
                     f.write(f"# {team}\n\n```\n{artifact}\n```\n")
 
-            # Commit and push
-            env = {
+            # Commit and push — include identity + non-interactive guards
+            git_env = {
                 "GIT_AUTHOR_NAME": "AI Factory",
                 "GIT_AUTHOR_EMAIL": "ai-factory@unicon.ai",
                 "GIT_COMMITTER_NAME": "AI Factory",
                 "GIT_COMMITTER_EMAIL": "ai-factory@unicon.ai",
+                **_GIT_NONINTERACTIVE_ENV,
             }
-            self._run(["git", "add", "."], cwd=tmpdir)
+            self._run(["git", "add", "."], cwd=tmpdir, env=git_env)
             self._run(
                 ["git", "commit", "-m", f"AI Factory: {project_id} - {requirement[:80]}"],
                 cwd=tmpdir,
-                env=env,
+                env=git_env,
             )
-            self._run(["git", "push", "origin", branch], cwd=tmpdir)
+            self._run(
+                ["git", "push", "--set-upstream", "origin", branch],
+                cwd=tmpdir,
+                env=git_env,
+            )
 
             return {
                 "status": "pushed",
@@ -108,6 +134,8 @@ class GitArtifactStore:
     @staticmethod
     def _run(cmd: list[str], cwd: str | None = None, env: dict | None = None) -> str:
         full_env = dict(os.environ)
+        # Always disable interactive prompts (Cloud Run has no TTY)
+        full_env.update(_GIT_NONINTERACTIVE_ENV)
         if env:
             full_env.update(env)
         result = subprocess.run(
