@@ -1,0 +1,173 @@
+steps:
+  # ── BUILD ──────────────────────────────────────────────────────────────
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build-memory
+    args: ['build', '-f', 'services/memory/Dockerfile', '-t', '${_BASE_IMAGE}/memory:${_TAG}', '.']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: push-memory
+    waitFor: ['build-memory']
+    args: ['push', '${_BASE_IMAGE}/memory:${_TAG}']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build-orchestrator
+    args: ['build', '-f', 'services/orchestrator/Dockerfile', '-t', '${_BASE_IMAGE}/orchestrator:${_TAG}', '.']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: push-orchestrator
+    waitFor: ['build-orchestrator']
+    args: ['push', '${_BASE_IMAGE}/orchestrator:${_TAG}']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build-chat
+    args: ['build', '-f', 'services/chat/Dockerfile', '-t', '${_BASE_IMAGE}/chat:${_TAG}', '.']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: push-chat
+    waitFor: ['build-chat']
+    args: ['push', '${_BASE_IMAGE}/chat:${_TAG}']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build-groupchat
+    args: ['build', '-f', 'services/groupchat/Dockerfile', '-t', '${_BASE_IMAGE}/groupchat:${_TAG}', '.']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: push-groupchat
+    waitFor: ['build-groupchat']
+    args: ['push', '${_BASE_IMAGE}/groupchat:${_TAG}']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build-clarification
+    args: ['build', '-f', 'services/clarification_responder/Dockerfile', '-t', '${_BASE_IMAGE}/clarification-responder:${_TAG}', '.']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: push-clarification
+    waitFor: ['build-clarification']
+    args: ['push', '${_BASE_IMAGE}/clarification-responder:${_TAG}']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build-litellm
+    args: ['build', '-f', 'services/litellm/Dockerfile', '-t', '${_BASE_IMAGE}/litellm:${_TAG}', '.']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: push-litellm
+    waitFor: ['build-litellm']
+    args: ['push', '${_BASE_IMAGE}/litellm:${_TAG}']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build-frontend
+    args: ['build', '-f', 'frontend/Dockerfile', '-t', '${_BASE_IMAGE}/frontend:${_TAG}', 'frontend/']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: push-frontend
+    waitFor: ['build-frontend']
+    args: ['push', '${_BASE_IMAGE}/frontend:${_TAG}']
+
+  # ── DEPLOY ─────────────────────────────────────────────────────────────
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deploy-memory
+    waitFor: ['push-memory']
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ai-factory-memory
+      - --image=${_BASE_IMAGE}/memory:${_TAG}
+      - --region=${_REGION}
+      - --project=${_PROJECT}
+      - --platform=managed
+      - --quiet
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deploy-orchestrator
+    waitFor: ['push-orchestrator']
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ai-factory-orchestrator
+      - --image=${_BASE_IMAGE}/orchestrator:${_TAG}
+      - --region=${_REGION}
+      - --project=${_PROJECT}
+      - --platform=managed
+      - --quiet
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deploy-chat
+    waitFor: ['push-chat']
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ai-factory-chat
+      - --image=${_BASE_IMAGE}/chat:${_TAG}
+      - --region=${_REGION}
+      - --project=${_PROJECT}
+      - --platform=managed
+      - --quiet
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deploy-groupchat
+    waitFor: ['push-groupchat']
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ai-factory-groupchat
+      - --image=${_BASE_IMAGE}/groupchat:${_TAG}
+      - --region=${_REGION}
+      - --project=${_PROJECT}
+      - --platform=managed
+      - --quiet
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deploy-clarification
+    waitFor: ['push-clarification']
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ai-factory-clarification-responder
+      - --image=${_BASE_IMAGE}/clarification-responder:${_TAG}
+      - --region=${_REGION}
+      - --project=${_PROJECT}
+      - --platform=managed
+      - --quiet
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deploy-litellm
+    waitFor: ['push-litellm']
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ai-factory-litellm
+      - --image=${_BASE_IMAGE}/litellm:${_TAG}
+      - --region=${_REGION}
+      - --project=${_PROJECT}
+      - --platform=managed
+      - --quiet
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deploy-frontend
+    waitFor: ['push-frontend']
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ai-factory-frontend
+      - --image=${_BASE_IMAGE}/frontend:${_TAG}
+      - --region=${_REGION}
+      - --project=${_PROJECT}
+      - --platform=managed
+      - --quiet
+
+substitutions:
+  _BASE_IMAGE: 'us-central1-docker.pkg.dev/unicon-494419/ai-factory'
+  _TAG: 'release-tools-v1'
+  _REGION: 'us-central1'
+  _PROJECT: 'unicon-494419'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
