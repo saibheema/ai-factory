@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import {
   Send, Settings, Database, MessageSquare, Users, Play, Loader2,
   CheckCircle2, XCircle, Clock, Bot, User, Key, Eye, EyeOff, Info,
-  Shield, Activity, ChevronDown, Zap, Search, LogOut, Plus, Trash2,
+  Shield, Activity, ChevronDown, ChevronRight, Zap, Search, LogOut, Plus, Trash2,
   GitBranch, FolderOpen, Cloud, ExternalLink, Monitor, Code2,
   Folder, FileCode, Copy, RefreshCw,
 } from 'lucide-react'
@@ -282,6 +282,23 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
   }
   const fileTree = buildTree()
 
+  const [collapsedFolders, setCollapsedFolders] = useState(new Set())
+  const toggleFolder = id => setCollapsedFolders(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s })
+  const fileIconColor = name => {
+    const ext = (name.split('.').pop() || '').toLowerCase()
+    if (['jsx','tsx'].includes(ext)) return '#f0a048'
+    if (['js','ts'].includes(ext)) return '#cbcb41'
+    if (['py'].includes(ext)) return '#4584b6'
+    if (['css','scss','less'].includes(ext)) return '#519aba'
+    if (['json'].includes(ext)) return '#cbcb41'
+    if (['md','mdx'].includes(ext)) return '#519aba'
+    if (['html'].includes(ext)) return '#e44d26'
+    if (['yaml','yml'].includes(ext)) return '#cb171e'
+    if (['sh','bash','zsh'].includes(ext)) return '#89e051'
+    if (name.toLowerCase() === 'dockerfile') return '#0db7ed'
+    return '#9dacbb'
+  }
+
   // Pick first file by default
   useEffect(() => {
     if (allFiles.length > 0 && !selectedFile) setSelectedFile(allFiles[0].key)
@@ -303,8 +320,7 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
 
     // Strip ES module syntax and markdown fences before handing to Babel
     const cleanCode = codeWithoutStyle
-      .replace(/^```[a-zA-Z0-9]*\s*\n?/gm, '')            // ``` ```jsx ```tsx etc.
-      .replace(/^```\s*$/gm, '')                           // closing ```
+      .replace(/^\s*```[^\n]*\n?/gm, '')                   // strip all markdown fences (incl. indented)
       .replace(/import\s+type\s+[\s\S]*?;?\n?/g, '')      // import type ...
       .replace(/import\s+[\s\S]*?from\s+['"][^'"]+['"];?\n?/g, '') // import ... from '...'
       .replace(/import\s+['"][^'"]+['"];?\n?/g, '')       // import '...'
@@ -458,58 +474,83 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
         )
       )}
 
-      {/* Code browser — folder tree */}
+      {/* Code browser — VS Code-style explorer */}
       {status === 'completed' && viewMode === 'code' && (
         <div className="previewCodeLayout">
-          <div className="previewFileTree">
-            <div className="previewFileTreeHeader">
-              <FolderOpen size={13} style={{ marginRight: 4 }} />
-              Project Structure
+          {/* Explorer sidebar */}
+          <div className="vsExplorer">
+            <div className="vsExplorerTitle"><FolderOpen size={12} style={{ marginRight: 5 }} />Explorer</div>
+            <div className="vsExplorerSection">
+              {Object.keys(fileTree).length === 0
+                ? <div className="vsEmpty">No code files</div>
+                : Object.entries(fileTree).map(([teamKey, { dirs, files: rootFiles }]) => {
+                    const teamId = `team:${teamKey}`
+                    const teamOpen = !collapsedFolders.has(teamId)
+                    const label = teamKey.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
+                    return (
+                      <div key={teamKey}>
+                        {/* Team-level folder */}
+                        <div className="vsRow vsDepth0 vsFolder" onClick={() => toggleFolder(teamId)}>
+                          <span className="vsChevron">{teamOpen ? <ChevronDown size={12}/> : <ChevronRight size={12}/>}</span>
+                          <Folder size={14} className="vsIcon" style={{ color: teamOpen ? '#dcb67a' : '#c09050', marginRight: 5, flexShrink: 0 }} />
+                          <span className="vsLabel vsLabelFolder">{label}</span>
+                        </div>
+                        {teamOpen && (
+                          <>
+                            {rootFiles.map(f => {
+                              const name = f.fname.split('/').pop()
+                              return (
+                                <div key={f.key}
+                                  className={`vsRow vsDepth1 vsFile ${selectedFile === f.key ? 'vsActive' : ''}`}
+                                  onClick={() => setSelectedFile(f.key)}>
+                                  <span className="vsChevron" />
+                                  <FileCode size={13} className="vsIcon" style={{ color: fileIconColor(name), marginRight: 5, flexShrink: 0 }} />
+                                  <span className="vsLabel">{name}</span>
+                                </div>
+                              )
+                            })}
+                            {Object.entries(dirs).map(([dirPath, dirFiles]) => {
+                              const dirId = `dir:${teamKey}/${dirPath}`
+                              const dirOpen = !collapsedFolders.has(dirId)
+                              return (
+                                <div key={dirPath}>
+                                  <div className="vsRow vsDepth1 vsFolder" onClick={() => toggleFolder(dirId)}>
+                                    <span className="vsChevron">{dirOpen ? <ChevronDown size={12}/> : <ChevronRight size={12}/>}</span>
+                                    <Folder size={13} className="vsIcon" style={{ color: '#dcb67a', marginRight: 5, flexShrink: 0 }} />
+                                    <span className="vsLabel vsLabelFolder">{dirPath}</span>
+                                  </div>
+                                  {dirOpen && dirFiles.map(f => {
+                                    const name = f.fname.split('/').pop()
+                                    return (
+                                      <div key={f.key}
+                                        className={`vsRow vsDepth2 vsFile ${selectedFile === f.key ? 'vsActive' : ''}`}
+                                        onClick={() => setSelectedFile(f.key)}>
+                                        <span className="vsChevron" />
+                                        <FileCode size={13} className="vsIcon" style={{ color: fileIconColor(name), marginRight: 5, flexShrink: 0 }} />
+                                        <span className="vsLabel">{name}</span>
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              )
+                            })}
+                          </>
+                        )}
+                      </div>
+                    )
+                  })
+              }
             </div>
-            {Object.keys(fileTree).length === 0 && (
-              <div className="previewNoFiles">No code files yet</div>
-            )}
-            {Object.entries(fileTree).map(([teamKey, { dirs, files: rootFiles }]) => (
-              <div key={teamKey} className="previewTreeTeam">
-                {/* Team root folder */}
-                <div className="previewTreeDir previewTreeRoot">
-                  <Folder size={13} style={{ color: '#f59e0b', marginRight: 4, flexShrink: 0 }} />
-                  <span>{teamKey.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}</span>
-                </div>
-                {/* Root-level files */}
-                {rootFiles.map(f => (
-                  <button key={f.key}
-                    className={`previewFileBtn previewFileDepth1 ${selectedFile === f.key ? 'active' : ''}`}
-                    onClick={() => setSelectedFile(f.key)}>
-                    <FileCode size={12} style={{ color: '#64748b', marginRight: 4, flexShrink: 0 }} />
-                    <span className="previewFileName">{f.fname.split('/').pop()}</span>
-                  </button>
-                ))}
-                {/* Sub-directories */}
-                {Object.entries(dirs).map(([dirPath, dirFiles]) => (
-                  <div key={dirPath}>
-                    <div className="previewTreeDir previewFileDepth1">
-                      <Folder size={12} style={{ color: '#f59e0b', marginRight: 4, flexShrink: 0 }} />
-                      <span>{dirPath}</span>
-                    </div>
-                    {dirFiles.map(f => (
-                      <button key={f.key}
-                        className={`previewFileBtn previewFileDepth2 ${selectedFile === f.key ? 'active' : ''}`}
-                        onClick={() => setSelectedFile(f.key)}>
-                        <FileCode size={12} style={{ color: '#64748b', marginRight: 4, flexShrink: 0 }} />
-                        <span className="previewFileName">{f.fname.split('/').pop()}</span>
-                      </button>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            ))}
           </div>
+          {/* Code pane */}
           <div className="previewCodePane">
             {currentFile ? (
               <>
                 <div className="previewCodeHeader">
-                  <span className="previewCodePath">{currentFile.key}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                    <FileCode size={13} style={{ color: fileIconColor(currentFile.key.split('/').pop()), flexShrink: 0 }} />
+                    <span className="previewCodePath" title={currentFile.key}>{currentFile.key}</span>
+                  </div>
                   <button className="previewCopyBtn" title="Copy" onClick={() => navigator.clipboard?.writeText(currentFile.content)}>
                     <Copy size={12} />
                   </button>
@@ -517,9 +558,9 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
                 <pre className="previewCode">{currentFile.content}</pre>
               </>
             ) : (
-              <div className="previewNoFiles" style={{ padding: '32px', textAlign: 'center' }}>
-                <FolderOpen size={32} style={{ color: '#cbd5e1', marginBottom: 8 }} />
-                <p>Select a file from the tree</p>
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#585b70', gap: 8 }}>
+                <FolderOpen size={32} style={{ color: '#3a3a4e' }} />
+                <span style={{ fontSize: 13 }}>Select a file</span>
               </div>
             )}
           </div>
