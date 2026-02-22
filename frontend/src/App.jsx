@@ -274,11 +274,14 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
     const inlineStyle = cssMatch ? cssMatch[1] : ''
     const codeWithoutStyle = jsxCode.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
 
-    // Strip ES module imports (CDN approach)
+    // Strip ES module syntax — CDN approach (React/ReactDOM loaded as globals)
     const cleanCode = codeWithoutStyle
-      .replace(/import\s+[\s\S]*?from\s+['"][^'"]+['"];?\n?/g, '')
-      .replace(/export\s+default\s+/g, '')
-      .replace(/export\s+/g, '')
+      .replace(/import\s+type\s+[\s\S]*?;?\n?/g, '')              // import type ...
+      .replace(/import\s+[\s\S]*?from\s+['"][^'"]+['"];?\n?/g, '') // import ... from '...'
+      .replace(/import\s+['"][^'"]+['"];?\n?/g, '')                // import '...'
+      .replace(/export\s+default\s+/g, '')                         // export default
+      .replace(/export\s+\{[^}]*\};?\n?/g, '')                    // export { Foo, Bar }
+      .replace(/^export\s+/gm, '')                                 // export function/const
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -299,27 +302,46 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
 <body>
   <div id="root"></div>
   <script type="text/babel">
+    /* React/ReactDOM available as globals from CDN */
     const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
     ${cleanCode}
 
-    // Auto-detect and render root component
-    (function mount() {
-      const candidates = ['App', 'Calculator', 'Main', 'Page', 'Application', 'Component', 'Root', 'Index'];
-      const found = candidates.find(n => { try { return typeof eval(n) === 'function'; } catch { return false; } });
-      const root = ReactDOM.createRoot(document.getElementById('root'));
-      if (found) {
-        root.render(React.createElement(eval(found)));
+    /* ── Mount: typeof checks work in Babel strict mode; eval() does NOT ── */
+    try {
+      const __comp =
+        typeof App         === 'function' ? App         :
+        typeof Calculator  === 'function' ? Calculator  :
+        typeof TodoApp     === 'function' ? TodoApp     :
+        typeof Main        === 'function' ? Main        :
+        typeof Page        === 'function' ? Page        :
+        typeof Application === 'function' ? Application :
+        typeof Dashboard   === 'function' ? Dashboard   :
+        typeof Component   === 'function' ? Component   :
+        null;
+
+      const __root = ReactDOM.createRoot(document.getElementById('root'));
+      if (__comp) {
+        __root.render(React.createElement(__comp));
       } else {
-        root.render(
+        __root.render(
           React.createElement('div', { style: { padding: '32px', textAlign: 'center', color: '#64748b' } },
-            React.createElement('h2', null, '⚠️ Preview Error'),
-            React.createElement('p', null, 'Could not detect a root React component. Check the Code tab.'),
-            React.createElement('p', { style: { fontSize: '12px' } }, 'Expected: App, Calculator, Main, Page, etc.')
+            React.createElement('h2', null, '\u26a0\ufe0f No Component Found'),
+            React.createElement('p', null, 'Expected a root component named: App, Calculator, Main, Page, Dashboard, etc.'),
+            React.createElement('p', { style: { fontSize: '12px', color: '#94a3b8' } }, 'Check the Code tab for the generated source.')
           )
         );
       }
-    })();
+    } catch (e) {
+      ReactDOM.createRoot(document.getElementById('root')).render(
+        React.createElement('div', { style: { padding: '32px', color: '#dc2626' } },
+          React.createElement('h2', null, '\u274c Runtime Error'),
+          React.createElement('pre', {
+            style: { background: '#fee2e2', padding: '12px', borderRadius: '6px', fontSize: '12px', whiteSpace: 'pre-wrap', overflowX: 'auto' }
+          }, String(e))
+        )
+      );
+    }
   </script>
 </body>
 </html>`
@@ -395,7 +417,7 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
             key={JSON.stringify(codeFiles.frontend_eng).slice(0, 40)}
             className="previewFrame"
             srcDoc={buildRunnable()}
-            sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"
+            sandbox="allow-scripts allow-forms allow-modals allow-popups"
             title="Live App Preview"
           />
         ) : (
