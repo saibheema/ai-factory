@@ -7,8 +7,7 @@ import { initializeApp } from 'firebase/app'
 import {
   getAuth,
   GoogleAuthProvider,
-  signInWithRedirect,
-  getRedirectResult,
+  signInWithPopup,
   signOut,
   onAuthStateChanged,
 } from 'firebase/auth'
@@ -29,12 +28,8 @@ const googleProvider = new GoogleAuthProvider()
 
 export { auth }
 
-/* Handle redirect result when page reloads after Google sign-in */
-getRedirectResult(auth).catch(() => { /* ignore — user not returning from redirect */ })
-
 export async function signInWithGoogle() {
-  await signInWithRedirect(auth, googleProvider)
-  /* Page navigates away — control returns via onAuthChange after redirect back */
+  return signInWithPopup(auth, googleProvider)
 }
 
 export async function logOut() {

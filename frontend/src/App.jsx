@@ -628,7 +628,9 @@ function LoginPage({ onLogin, loading: parentLoading }) {
   const handleLogin = async () => {
     setLoading(true); setError('')
     try { await signInWithGoogle() }
-    catch (e) { setError(e.message || 'Sign-in failed') }
+    catch (e) {
+      if (e?.code !== 'auth/popup-closed-by-user') setError(e.message || 'Sign-in failed')
+    }
     finally { setLoading(false) }
   }
 
