@@ -410,6 +410,11 @@ function PreviewPanel({ taskStatus, onRunPipeline, onLoadGit, repoFiles, repoLoa
   const hasCode = allFiles.length > 0
   // hasFrontend = any .jsx/.tsx file present — LLM may name it anything (Calculator.jsx, App.jsx, etc.)
   const hasFrontend = allFiles.some(f => f.fname.endsWith('.jsx') || f.fname.endsWith('.tsx'))
+  const hasPython = !hasFrontend && allFiles.some(f => f.fname.endsWith('.py'))
+  const hasTS = !hasFrontend && !hasPython && allFiles.some(f => f.fname.endsWith('.ts'))
+  const hasGo = !hasFrontend && !hasPython && allFiles.some(f => f.fname.endsWith('.go'))
+  const hasRust = !hasFrontend && !hasPython && allFiles.some(f => f.fname.endsWith('.rs'))
+  const hasJava = !hasFrontend && !hasPython && allFiles.some(f => f.fname.endsWith('.java'))
 
   const status = taskStatus?.status
 
@@ -422,12 +427,21 @@ function PreviewPanel({ taskStatus, onRunPipeline, onLoadGit, repoFiles, repoLoa
           <span className="previewMeta">
             {allFiles.length > 0 && <>{allFiles.length} file{allFiles.length !== 1 ? 's' : ''}</>}
             {repoFiles && <span className="previewTag" style={{ background: '#1e3a5f' }}>📦 From Git:{repoBranch}</span>}
-            {hasFrontend && <span className="previewTag">React App</span>}
+            {hasFrontend && <span className="previewTag">⚛ React App</span>}
+            {hasPython && <span className="previewTag" style={{ background: '#1a3a5c', color: '#79b8ff' }}>🐍 Python</span>}
+            {hasTS && <span className="previewTag" style={{ background: '#1a2a3a', color: '#4fc3f7' }}>🔷 TypeScript</span>}
+            {hasGo && <span className="previewTag" style={{ background: '#002d3a', color: '#00acd7' }}>🐹 Go</span>}
+            {hasRust && <span className="previewTag" style={{ background: '#2a1a0a', color: '#f7a033' }}>🦀 Rust</span>}
+            {hasJava && <span className="previewTag" style={{ background: '#1a2a1a', color: '#f89820' }}>☕ Java</span>}
+            {!hasFrontend && !hasPython && !hasTS && !hasGo && !hasRust && !hasJava && allFiles.length > 0 && (
+              <span className="previewTag" style={{ background: '#1a1a2a', color: '#aaa' }}>📄 Code</span>
+            )}
           </span>
         </div>
         <div className="previewViewToggle">
           <button className={`previewToggleBtn ${viewMode === 'preview' ? 'active' : ''}`}
-            onClick={() => setViewMode('preview')} disabled={!hasFrontend}>
+            onClick={() => setViewMode('preview')} disabled={!hasFrontend}
+            title={!hasFrontend ? 'No React/JSX files detected — use Code tab' : 'Preview React app'}>
             <Eye size={13} /> App
           </button>
           <button className={`previewToggleBtn ${viewMode === 'code' ? 'active' : ''}`}

@@ -458,6 +458,15 @@ def _run_full_pipeline_tracked(
     except Exception as e:
         log.warning("Drive folder setup failed: %s", e)
 
+    # ── Inter-team knowledge accumulation ──────────────────────────────────────
+    # These teams produce architectural decisions, requirements, or design
+    # rationale that all downstream teams should build on top of.
+    _KNOWLEDGE_PRODUCERS_SET = frozenset({
+        "product_mgmt", "biz_analysis", "solution_arch",
+        "api_design", "ux_ui", "security_eng",
+    })
+    shared_knowledge_parts: list[str] = []
+
     try:
         for idx, team in enumerate(teams):
             with task_runs_lock:
@@ -491,6 +500,7 @@ def _run_full_pipeline_tracked(
                 git_token=_git_token,
                 folder_id=_folder_id,
                 all_code=flat_code or None,
+                shared_knowledge="\n\n".join(shared_knowledge_parts),
             )
 
             artifacts[team] = stage.artifact
@@ -519,6 +529,18 @@ def _run_full_pipeline_tracked(
                     )
                 except Exception as _dec_exc:
                     log.warning("Decision log failed for %s: %s", team, _dec_exc)
+
+            # ── Harvest knowledge for downstream teams ───────────────────────
+            # Key producers' rationale/decisions are accumulated so that every
+            # team that runs AFTER them automatically receives this as context.
+            if team in _KNOWLEDGE_PRODUCERS_SET:
+                _rationale = stage.decision_rationale or ""
+                _title = stage.decision_title or team
+                if _rationale:
+                    _label = team.replace("_", " ").title()
+                    shared_knowledge_parts.append(
+                        f"[{_label}] {_title}:\n{_rationale[:500]}"
+                    )
 
             summary = (
                 f"phase2-stage={team} prior={len(prior)} "

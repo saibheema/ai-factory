@@ -248,9 +248,15 @@ class TeamLLMRuntime:
         # Conservative coarse estimate for governance-only checks.
         return max(0.001, (text_chars / 1000.0) * 0.003)
 
+    # Teams that generate code files — need special follow-up handling
+    _CODE_TEAMS = frozenset({"frontend_eng", "backend_eng", "database_eng", "data_eng", "ml_eng", "devops", "qa_eng"})
+
     def generate(self, team: str, requirement: str, prior_count: int, handoff_to: str) -> LLMGeneration | None:
         if not self.enabled:
             return None
+
+        # Detect follow-up / incremental update mode
+        is_followup = "=== EXISTING PROJECT CODE" in requirement
 
         # Use team-specific prompt if available, otherwise generic
         prompt_template = _TEAM_PROMPTS.get(team, (
@@ -269,10 +275,28 @@ class TeamLLMRuntime:
             return None
 
         model = self.TEAM_MODEL.get(team, "factory/cheap")
+
+        # Build system prompt — incremental mode for follow-up code generations
+        if is_followup and team in self._CODE_TEAMS:
+            system_content = (
+                "You are a specialist software delivery assistant working on an INCREMENTAL UPDATE.\n"
+                "The existing code is provided in the requirement between '=== EXISTING PROJECT CODE ===' markers.\n"
+                "RULES:\n"
+                "1. EXTEND and MODIFY the existing code — do NOT rewrite it from scratch.\n"
+                "2. Preserve ALL existing functionality — only add or change what the new requirement specifies.\n"
+                "3. Output the COMPLETE updated file(s), not diffs or partial code.\n"
+                "4. Maintain the same coding style and structure as the existing code."
+            )
+        else:
+            system_content = (
+                "You are a specialist software delivery assistant. "
+                "Return exactly what is asked — no preamble, no explanation, just the deliverable content."
+            )
+
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "You are a specialist software delivery assistant. Return exactly what is asked — no preamble, no explanation, just the deliverable content."},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.3,

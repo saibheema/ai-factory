@@ -774,6 +774,7 @@ def run_phase2_handler(
     git_token: str = "",
     folder_id: str | None = None,
     all_code: dict[str, str] | None = None,
+    shared_knowledge: str = "",  # key decisions from upstream teams
 ) -> Phase2StageArtifact:
     """Execute a Phase 2 stage for one team with real tool invocations."""
 
@@ -800,13 +801,24 @@ def run_phase2_handler(
     }
     detail, handoff = specialized.get(team, ("team objective drafted", "none"))
 
-    # 2. LLM generation (best-effort)
+    # 2. Build effective requirement — prepend upstream knowledge so every team
+    #    can see and build on what Sol Arch, BA, PM etc. decided before them.
+    effective_req = requirement
+    if shared_knowledge:
+        effective_req = (
+            "=== KEY DECISIONS FROM UPSTREAM TEAMS (read carefully — build on this) ===\n"
+            + shared_knowledge
+            + "\n=== END UPSTREAM DECISIONS ===\n\n"
+            + requirement
+        )
+
+    # 3. LLM generation (best-effort)
     source = "deterministic"
     cost = 0.0
     remaining = 0.0
     a2a_dispatched: list[str] = []
     if llm_runtime is not None:
-        generated = llm_runtime.generate(team=team, requirement=requirement, prior_count=prior_count, handoff_to=handoff)
+        generated = llm_runtime.generate(team=team, requirement=effective_req, prior_count=prior_count, handoff_to=handoff)
         if generated is not None:
             detail = generated.content
             source = generated.source
