@@ -528,6 +528,7 @@ def _run_full_pipeline_tracked(
                 folder_id=_folder_id,
                 all_code=flat_code or None,
                 shared_knowledge="\n\n".join(shared_knowledge_parts),
+                next_team=teams[idx + 1] if idx + 1 < len(teams) else "none",
             )
 
             artifacts[team] = stage.artifact
