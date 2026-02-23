@@ -663,6 +663,23 @@ def _run_full_pipeline_tracked(
             st["updated_at"] = datetime.now(UTC).isoformat()
         _task_store_save(task_id, run_state, uid, req.project_id)
 
+        # ── Auto-merge all AI branches into main after successful run ──────────
+        try:
+            git_cfg2 = _get_firestore().get_git_config(uid, req.project_id)
+            if git_cfg2 and git_cfg2.get("git_url"):
+                git_token2 = _get_firestore().get_git_token(uid) or ""
+                if git_token2:
+                    merge_summary = _get_git().merge_all_ai_branches(
+                        git_url=git_cfg2["git_url"],
+                        git_token=git_token2,
+                        target_branch="main",
+                    )
+                    log.info("Auto-merge after pipeline: %s", merge_summary)
+                    with task_runs_lock:
+                        task_runs[task_id]["result"]["auto_merge"] = merge_summary
+        except Exception as _am_exc:
+            log.warning("Auto-merge failed (non-fatal): %s", _am_exc)
+
     except Exception as exc:
         _push_error(req.project_id, "ERROR", f"Pipeline task {task_id} failed: {exc}")
         with task_runs_lock:
@@ -1566,6 +1583,61 @@ def merge_git_branch(
         return result
     except HTTPException:
         raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/projects/{project_id}/git/merge-all")
+def merge_all_git_branches(
+    project_id: str,
+    user: AuthUser = Depends(get_current_user),
+    target: str = "main",
+) -> dict:
+    """Merge every ai-factory/* branch into target (default: main)."""
+    try:
+        git_cfg = _get_firestore().get_git_config(user.uid, project_id)
+        if not (git_cfg and git_cfg.get("git_url")):
+            raise HTTPException(status_code=400, detail="No git repository configured")
+        git_token = _get_firestore().get_git_token(user.uid) or ""
+        if not git_token:
+            raise HTTPException(status_code=400, detail="No GitHub PAT configured")
+        result = _get_git().merge_all_ai_branches(
+            git_url=git_cfg["git_url"],
+            git_token=git_token,
+            target_branch=target,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/git/files")
+def get_git_repo_files(
+    project_id: str,
+    branch: str = "main",
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Fetch all code files from the repo for display in Live Preview."""
+    try:
+        git_cfg = _get_firestore().get_git_config(user.uid, project_id)
+        if not (git_cfg and git_cfg.get("git_url")):
+            return {"files": {}, "file_list": [], "error": "No git repository configured"}
+        git_token = _get_firestore().get_git_token(user.uid) or ""
+        if not git_token:
+            return {"files": {}, "file_list": [], "error": "No GitHub PAT configured"}
+        raw = _get_git().fetch_repo_tree(git_cfg["git_url"], git_token, branch, max_files=120)
+        files = {}
+        for f in raw:
+            if f["content"] and not f["content"].startswith("("):
+                files[f["path"]] = f["content"]
+        return {
+            "files": files,
+            "file_list": [{"path": f["path"], "size": f["size"]} for f in raw],
+            "branch": branch,
+            "git_url": git_cfg["git_url"],
+        }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

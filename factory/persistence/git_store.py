@@ -212,6 +212,42 @@ class GitArtifactStore:
             return [{"name": "error", "sha": "", "is_ai": False,
                      "protected": False, "error": str(exc)}]
 
+    def merge_all_ai_branches(
+        self,
+        git_url: str,
+        git_token: str,
+        target_branch: str = "main",
+    ) -> dict:
+        """Find every ai-factory/* branch and merge it into target_branch.
+
+        Returns a summary dict: {merged: [...], skipped: [...], failed: [...]}
+        """
+        merged, skipped, failed = [], [], []
+        try:
+            branches = self.list_branches(git_url, git_token)
+            ai_branches = [b for b in branches if b.get("is_ai") and not b.get("protected") and b.get("name") != target_branch]
+            for b in ai_branches:
+                result = self.merge_branch(
+                    git_url=git_url,
+                    git_token=git_token,
+                    source_branch=b["name"],
+                    target_branch=target_branch,
+                )
+                if result["status"] == "merged":
+                    merged.append(b["name"])
+                elif result["status"] == "already_merged":
+                    skipped.append(b["name"])
+                else:
+                    failed.append({"branch": b["name"], "error": result.get("error", "")})
+        except Exception as exc:
+            failed.append({"branch": "*", "error": str(exc)})
+        return {
+            "merged": merged,
+            "skipped": skipped,
+            "failed": failed,
+            "total_ai_branches": len(merged) + len(skipped) + len(failed),
+        }
+
     def merge_branch(
         self,
         git_url: str,

@@ -243,14 +243,15 @@ function AgentActivityPanel({ taskStatus }) {
 /* ═══════════════════════════════════════════════════════════
    Preview Panel — Live app execution (Google AI Studio-style)
    ═══════════════════════════════════════════════════════════ */
-function PreviewPanel({ taskStatus, onRunPipeline }) {
+function PreviewPanel({ taskStatus, onRunPipeline, onLoadGit, repoFiles, repoLoading, repoBranch, onChangeBranch }) {
   const [viewMode, setViewMode] = useState('preview')
   const [selectedFile, setSelectedFile] = useState(null)
 
   const result = taskStatus?.result || {}
   const codeFiles = result.code_files || {}         // {team: {filename: content}}
-  const unifiedCode = result.unified_code || null   // {filename: content} — flat project tree
-  const fileAttribution = result.file_attribution || {} // {filename: team}
+  // Prefer repo files (pulled from git) over pipeline-cached files
+  const unifiedCode = repoFiles || result.unified_code || null
+  const fileAttribution = repoFiles ? {} : (result.file_attribution || {})
   const mdArtifacts = result.artifacts || {}        // {team: metadata-text}
 
   // Build flat file list — prefer unified tree, fall back to per-team
@@ -418,12 +419,11 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
       <div className="previewToolbar">
         <div className="previewLeft">
           <span className="previewTitle"><Monitor size={15} /> Live Preview</span>
-          {status === 'completed' && (
-            <span className="previewMeta">
-              {allFiles.length} file{allFiles.length !== 1 ? 's' : ''}
-              {hasFrontend && <span className="previewTag">React App</span>}
-            </span>
-          )}
+          <span className="previewMeta">
+            {allFiles.length > 0 && <>{allFiles.length} file{allFiles.length !== 1 ? 's' : ''}</>}
+            {repoFiles && <span className="previewTag" style={{ background: '#1e3a5f' }}>📦 From Git:{repoBranch}</span>}
+            {hasFrontend && <span className="previewTag">React App</span>}
+          </span>
         </div>
         <div className="previewViewToggle">
           <button className={`previewToggleBtn ${viewMode === 'preview' ? 'active' : ''}`}
@@ -438,6 +438,22 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
             onClick={() => setViewMode('artifacts')} disabled={Object.keys(mdArtifacts).length === 0}>
             <Activity size={13} /> Artifacts
           </button>
+          {onLoadGit && (
+            <>
+              <input
+                className="previewBranchInput"
+                value={repoBranch || 'main'}
+                onChange={e => onChangeBranch && onChangeBranch(e.target.value)}
+                title="Branch"
+                placeholder="main"
+                style={{ width: 72, fontSize: 11, padding: '2px 6px', marginLeft: 4 }}
+              />
+              <button className="previewToggleBtn" onClick={() => { setViewMode('code'); onLoadGit() }} disabled={repoLoading}
+                title="Pull all files from Git repo">
+                {repoLoading ? <Loader2 size={13} className="spin" /> : <GitBranch size={13} />} Git
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -446,15 +462,20 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
         <div className="previewEmpty">
           <Monitor size={48} className="previewEmptyIcon" />
           <h3>No run yet</h3>
-          <p>Run a pipeline to see your application rendered live here — like Google AI Studio.</p>
-          {onRunPipeline && (
-            <button className="previewGoBtn" onClick={onRunPipeline}>
-              <Play size={14} /> Go to Pipeline
+          <p>Run a pipeline to see code here, or load files directly from your Git repository.</p>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
+            {onRunPipeline && (
+              <button className="previewGoBtn" onClick={onRunPipeline}>
+                <Play size={14} /> Run Pipeline
+              </button>
+            )}
+            <button className="previewGoBtn" style={{ background: '#1e293b' }}
+              onClick={() => { setViewMode('code'); onLoadGit && onLoadGit() }}
+              disabled={!onLoadGit}>
+              <GitBranch size={14} /> Load from Git
             </button>
-          )}
-          <span className="previewHint">
-            Generated React code renders in a live sandboxed iframe. Code files and artifacts are also browseable.
-          </span>
+          </div>
+          <span className="previewHint">Generated React code renders in a live sandboxed iframe.</span>
         </div>
       )}
 
@@ -844,6 +865,13 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   const [mergeInProgress, setMergeInProgress] = useState('')  // branch name being merged
   const [mergeResults, setMergeResults] = useState({})  // { branchName: result }
   const [mergeTarget, setMergeTarget] = useState('main')
+  const [mergingAll, setMergingAll] = useState(false)
+  const [mergeAllResult, setMergeAllResult] = useState(null)
+
+  /* Git repo files (for Live Preview code browser) */
+  const [repoFiles, setRepoFiles] = useState(null)  // {filename: content} from repo
+  const [repoLoading, setRepoLoading] = useState(false)
+  const [repoBranch, setRepoBranch] = useState('main')
 
   /* Self Heal state */
   const [healStatus, setHealStatus] = useState(null)
@@ -1054,6 +1082,28 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
       else setBranches(data.branches || [])
     } catch (e) { setBranchesError(e?.message || 'Failed to load branches') }
     finally { setBranchesLoading(false) }
+  }
+
+  async function loadRepoFiles(branch) {
+    setRepoLoading(true)
+    try {
+      const data = await api(`/api/projects/${projectId}/git/files?branch=${branch || repoBranch}`)
+      if (data.error) { setError(data.error) }
+      else { setRepoFiles(data.files || {}); setRepoBranch(data.branch || branch || repoBranch) }
+    } catch (e) { setError(e?.message || 'Failed to load repo files') }
+    finally { setRepoLoading(false) }
+  }
+
+  async function mergeAllBranches() {
+    setMergingAll(true); setMergeAllResult(null)
+    try {
+      const result = await api(`/api/projects/${projectId}/git/merge-all?target=${mergeTarget}`, { method: 'POST' })
+      setMergeAllResult(result)
+      // Refresh branch list and clear individual merge results
+      setMergeResults({})
+      await loadBranches()
+    } catch (e) { setMergeAllResult({ failed: [{ branch: '*', error: e?.message }] }) }
+    finally { setMergingAll(false) }
   }
 
   async function doMerge(sourceBranch, targetBranch) {
@@ -1404,7 +1454,15 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
 
           {/* Live Preview */}
           {activeTab === 'preview' && (
-            <PreviewPanel taskStatus={taskStatus} onRunPipeline={() => setActiveTab('pipeline')} />
+            <PreviewPanel
+              taskStatus={taskStatus}
+              onRunPipeline={() => setActiveTab('pipeline')}
+              onLoadGit={() => loadRepoFiles(repoBranch)}
+              repoFiles={repoFiles}
+              repoLoading={repoLoading}
+              repoBranch={repoBranch}
+              onChangeBranch={b => setRepoBranch(b)}
+            />
           )}
 
           {/* Group Chat */}
@@ -1696,23 +1754,68 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
         {activeTab === 'merge' && (
           <div className="settingsPanel">
             <div className="settingsHeader">
-              <div><h3>Merge Team</h3><p>Review AI-generated branches and merge to <code>main</code> or <code>dev</code>.</p></div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <div>
+                <h3>Merge Team</h3>
+                <p>AI-generated branches are auto-merged after each pipeline run. Use <strong>Merge All</strong> to merge any pending branches manually.</p>
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                 <select className="mergeTargetSelect" value={mergeTarget} onChange={e => setMergeTarget(e.target.value)}>
                   <option value="main">→ main</option>
                   <option value="dev">→ dev</option>
                   <option value="staging">→ staging</option>
                 </select>
-                <button className="primaryBtn" onClick={loadBranches} disabled={branchesLoading}>
-                  {branchesLoading ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}&nbsp;Refresh
+                <button className="primaryBtn" style={{ background: '#16a34a' }}
+                  onClick={mergeAllBranches} disabled={mergingAll || branchesLoading}>
+                  {mergingAll ? <><Loader2 size={14} className="spin" /> Merging All…</> : <><GitMerge size={14} /> Merge All AI Branches</>}
+                </button>
+                <button className="secondaryBtn" onClick={loadBranches} disabled={branchesLoading}>
+                  {branchesLoading ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
                 </button>
               </div>
             </div>
+
+            {/* Auto-merge summary from last pipeline run */}
+            {taskStatus?.result?.auto_merge && (() => {
+              const am = taskStatus.result.auto_merge
+              return (
+                <div style={{ margin: '0 0 12px', padding: '10px 14px', background: '#0f2a1a', borderRadius: 8, fontSize: 12, color: '#86efac', border: '1px solid #166534' }}>
+                  <strong>⚡ Auto-merged after last pipeline:</strong>&nbsp;
+                  {am.merged?.length > 0 && <span style={{ color: '#4ade80' }}>✅ {am.merged.length} merged</span>}
+                  {am.skipped?.length > 0 && <span style={{ color: '#94a3b8', marginLeft: 8 }}>⏭ {am.skipped.length} already up-to-date</span>}
+                  {am.failed?.length > 0 && <span style={{ color: '#f87171', marginLeft: 8 }}>❌ {am.failed.length} failed</span>}
+                </div>
+              )
+            })()}
+
+            {/* Merge All result */}
+            {mergeAllResult && (
+              <div style={{ margin: '0 0 12px', padding: '10px 14px', background: '#0f172a', borderRadius: 8, fontSize: 12, border: '1px solid #334155' }}>
+                <strong style={{ color: '#e2e8f0' }}>Merge All result:</strong>&nbsp;
+                {mergeAllResult.merged?.length > 0 && <span style={{ color: '#4ade80' }}>✅ {mergeAllResult.merged.length} merged ({mergeAllResult.merged.join(', ')})</span>}
+                {mergeAllResult.skipped?.length > 0 && <span style={{ color: '#94a3b8', marginLeft: 8 }}>⏭ {mergeAllResult.skipped.length} already up-to-date</span>}
+                {mergeAllResult.failed?.length > 0 && <span style={{ color: '#f87171', marginLeft: 8 }}>❌ {mergeAllResult.failed.map(f => f.branch + ': ' + f.error).join('; ')}</span>}
+              </div>
+            )}
+
             {branchesError && <div className="healAlert"><AlertTriangle size={14} /> {branchesError}</div>}
+
+            {/* Branch counts */}
+            {branches.length > 0 && (() => {
+              const ai = branches.filter(b => b.is_ai)
+              const normal = branches.filter(b => !b.is_ai && !b.protected)
+              return (
+                <div style={{ display: 'flex', gap: 10, margin: '0 0 12px', fontSize: 12, color: '#94a3b8' }}>
+                  <span>Total: <strong style={{ color: '#e2e8f0' }}>{branches.length}</strong></span>
+                  <span>🤖 AI branches: <strong style={{ color: '#60a5fa' }}>{ai.length}</strong></span>
+                  <span>Other: <strong style={{ color: '#e2e8f0' }}>{normal.length}</strong></span>
+                </div>
+              )
+            })()}
+
             {!branchesError && branches.length === 0 && !branchesLoading && (
               <div className="healEmpty">
                 <GitMerge size={32} style={{ color: '#cbd5e1', marginBottom: 8 }} />
-                <p>No branches found. Configure a Git repository in Settings first.</p>
+                <p>No branches found. Configure a Git repository in Settings first, or click Refresh.</p>
               </div>
             )}
             <div className="branchList">
@@ -1736,8 +1839,8 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                         </span>
                       )}
                       {!b.protected && (
-                        <button className="mergeBtn" disabled={!!isMerging || !!mergeInProgress} onClick={() => doMerge(b.name, mergeTarget)}>
-                          {isMerging ? <><Loader2 size={12} className="spin" /> Merging…</> : <><GitMerge size={12} /> Merge → {mergeTarget}</>}
+                        <button className="mergeBtn" disabled={!!isMerging || !!mergeInProgress || mergingAll} onClick={() => doMerge(b.name, mergeTarget)}>
+                          {isMerging ? <><Loader2 size={12} className="spin" /> Merging…</> : <><GitMerge size={12} /> Merge</>}
                         </button>
                       )}
                     </div>
