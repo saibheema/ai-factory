@@ -889,7 +889,9 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
         if (session.last_run) {
           const run = session.last_run
           const taskId = session.last_task_id
-          setTaskStatus({ status: run.status || 'completed', result: run })
+          // Spread the full run so top-level fields (activities, current_team, etc.)
+          // are accessible directly on taskStatus — same shape as live-poll response.
+          setTaskStatus({ ...run, status: run.status || 'completed', result: run })
           // Don't re-poll a restored task — it's already complete and the service
           // may have restarted (in-memory task_runs wiped). Polling would 404 forever.
           setPipelineHistory([
