@@ -173,6 +173,24 @@ def _push_error(project_id: str, level: str, msg: str) -> None:
 task_runs: dict[str, dict] = {}
 task_runs_lock = threading.Lock()
 
+# Per-task communications log — keyed by task_id
+# Each entry: {ts, type, from_team, to_team, message}
+_comms_logs: dict[str, list] = defaultdict(list)
+_comms_logs_lock = threading.Lock()
+
+
+def _push_comms(task_id: str, from_team: str, to_team: str, msg_type: str, message: str) -> None:
+    """Append a team-to-team communication event to the task comms log."""
+    entry = {
+        "ts": datetime.now(UTC).isoformat(),
+        "type": msg_type,        # "handoff" | "context" | "clarification" | "status"
+        "from_team": from_team,
+        "to_team": to_team,
+        "message": message[:600],
+    }
+    with _comms_logs_lock:
+        _comms_logs[task_id].append(entry)
+
 
 def _task_store_save(
     task_id: str, payload: dict, uid: str = "", project_id: str = ""
@@ -362,7 +380,7 @@ def _run_full_pipeline_tracked(
     Only runs the teams relevant to the requirement (smart routing).
     Persists progress to Firestore, artifacts to GCS or Git.
     """
-    teams = _select_teams(req.requirement)
+    teams = _select_teams(req.requirement, llm_runtime)
     run_state = {
         "task_id": task_id,
         "project_id": req.project_id,
@@ -464,8 +482,13 @@ def _run_full_pipeline_tracked(
     _KNOWLEDGE_PRODUCERS_SET = frozenset({
         "product_mgmt", "biz_analysis", "solution_arch",
         "api_design", "ux_ui", "security_eng",
+        "backend_eng", "database_eng", "frontend_eng", "devops", "qa_eng",
     })
     shared_knowledge_parts: list[str] = []
+
+    # Announce pipeline start in comms log
+    _push_comms(task_id, "orchestrator", teams[0] if teams else "none", "status",
+                f"Pipeline started for: {req.requirement[:200]}. Selected teams: {', '.join(teams)}")
 
     try:
         for idx, team in enumerate(teams):
@@ -475,6 +498,10 @@ def _run_full_pipeline_tracked(
                 st["activities"][idx]["status"] = "in_progress"
                 st["updated_at"] = datetime.now(UTC).isoformat()
             _task_store_save(task_id, run_state, uid, req.project_id)
+
+            # Announce team starting
+            _push_comms(task_id, "orchestrator", team, "status",
+                        f"Assigning task to {team}. Shared context from {len(shared_knowledge_parts)} upstream team(s).")
 
             bank_id = f"team-{team}"
             prior = (
@@ -538,9 +565,22 @@ def _run_full_pipeline_tracked(
                 _title = stage.decision_title or team
                 if _rationale:
                     _label = team.replace("_", " ").title()
+                    # Sol Arch gets more space as it's foundational; others get 800 chars
+                    _max_chars = 1200 if team == "solution_arch" else 800
                     shared_knowledge_parts.append(
-                        f"[{_label}] {_title}:\n{_rationale[:500]}"
+                        f"[{_label}] {_title}:\n{_rationale[:_max_chars]}"
                     )
+                    # Emit context-share comms event to downstream teams
+                    next_team = teams[idx + 1] if idx + 1 < len(teams) else "all"
+                    _push_comms(task_id, team, next_team, "context",
+                                f"{_title}: {_rationale[:300]}")
+
+            # ── Emit handoff comms event ──────────────────────────────────
+            _action = _extract_action(stage.artifact)
+            next_team = teams[idx + 1] if idx + 1 < len(teams) else "none"
+            _push_comms(task_id, team, next_team, "handoff",
+                        f"{_action or 'Completed work'} → passing to {next_team}. "
+                        f"Artifact: {stage.artifact[:200].replace(chr(10), ' ')}")
 
             summary = (
                 f"phase2-stage={team} prior={len(prior)} "
@@ -1084,9 +1124,29 @@ async def stream_task_status(
     )
 
 
-# ═══════════════════════════════════════════════════════════
-#  PROJECT Q&A, CHAT, GROUP CHAT (user-scoped memory)
-# ═══════════════════════════════════════════════════════════
+@app.get("/api/tasks/{task_id}/comms")
+def get_task_comms(
+    task_id: str,
+    since: int = 0,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Return the inter-team communications log for a running or completed task.
+
+    ``since`` is an optional index offset — pass the number of events already
+    received to get only new events (supports incremental polling).
+    """
+    with _comms_logs_lock:
+        all_events = list(_comms_logs.get(task_id, []))
+    task = _task_store_load(task_id)
+    return {
+        "task_id": task_id,
+        "total": len(all_events),
+        "events": all_events[since:],
+        "task_status": task.get("status") if task else "unknown",
+    }
+
+
+
 @app.post("/api/projects/{project_id}/qa")
 def project_qa(
     project_id: str,
@@ -1809,9 +1869,90 @@ def learn_git_repo(
     }
 
 
-# ═══════════════════════════════════════════════════════════
-#  MEMORY BANK DETAIL — items for a specific team
-# ═══════════════════════════════════════════════════════════
+class GitCloneRequest(BaseModel):
+    clone_url: str = Field(min_length=5, description="URL of the external repo to clone and learn from")
+    branch: str = "main"
+
+
+@app.post("/api/projects/{project_id}/git/clone")
+def clone_external_repo(
+    project_id: str,
+    body: GitCloneRequest,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Clone an external repository, analyze its codebase, and store the knowledge
+    so all pipeline agents can build on top of it.
+
+    This enables the 'build on top of existing repo' workflow: paste any public
+    (or private, if token is set) repo URL and the agents will learn its structure,
+    tech stack, and conventions before running the pipeline.
+    """
+    git_token = ""
+    try:
+        git_token = _get_firestore().get_git_token(user.uid) or ""
+    except Exception:
+        pass
+
+    files = _get_git().fetch_repo_tree(body.clone_url, git_token, body.branch, max_files=120)
+    if not files or (len(files) == 1 and files[0]["path"] == "error"):
+        return {"status": "failed", "error": files[0]["content"] if files else "empty"}
+
+    tree_summary = "\n".join(f"  {f['path']} ({f['size']}B)" for f in files[:100])
+    key_contents = "\n\n".join(
+        f"### {f['path']}\n{f['content'][:2000]}"
+        for f in files
+        if f['content'] and not f['content'].startswith('(')
+    )[:12000]
+
+    analysis_prompt = (
+        f"You are the Solution Architect studying an external codebase to clone and build on top of for project '{project_id}'.\n"
+        f"Repo URL: {body.clone_url}\n\n"
+        f"REPO STRUCTURE:\n{tree_summary}\n\n"
+        f"KEY FILES:\n{key_contents}\n\n"
+        f"Produce structured notes covering:\n"
+        f"1. TECH STACK: languages, frameworks, libraries\n"
+        f"2. ARCHITECTURE: patterns, folder structure, entry points\n"
+        f"3. KEY COMPONENTS: main modules, their purposes\n"
+        f"4. DATA MODEL: schemas, models, database\n"
+        f"5. API SURFACE: endpoints, routes\n"
+        f"6. BUILD & DEPLOY: scripts, configs, CI/CD\n"
+        f"7. CONVENTIONS: naming, style, patterns to follow when extending\n"
+        f"8. HOW TO EXTEND: what a developer needs to know to add features\n"
+    )
+    notes = ""
+    try:
+        result = llm_runtime.generate(team="solution_arch", requirement=analysis_prompt, prior_count=0, handoff_to="none")
+        if result and result.content:
+            notes = result.content
+    except Exception:
+        notes = f"Cloned repo analysis:\nFiles: {len(files)}\nStructure:\n{tree_summary[:3000]}"
+
+    store = _get_firestore()
+    # Use a structured prefix so downstream consumers can parse reliably
+    repo_knowledge = f"{project_id}|cloned_repo|{body.clone_url}|{notes[:4000]}"
+    for team in ALL_TEAMS:
+        bank_id = f"team-{team}"
+        try:
+            store.retain(user.uid, project_id, bank_id, repo_knowledge)
+        except Exception:
+            pass
+    file_index = f"{project_id}|cloned_repo_files|{body.clone_url}|" + ", ".join(f['path'] for f in files[:100])
+    try:
+        store.retain(user.uid, project_id, "team-solution_arch", file_index)
+    except Exception:
+        pass
+
+    return {
+        "status": "cloned",
+        "clone_url": body.clone_url,
+        "files_analyzed": len(files),
+        "notes_length": len(notes),
+        "notes_preview": notes[:500],
+        "file_tree": [f["path"] for f in files[:60]],
+    }
+
+
+
 @app.get("/api/projects/{project_id}/memory-map/{bank_id}")
 def get_memory_bank_detail(
     project_id: str,

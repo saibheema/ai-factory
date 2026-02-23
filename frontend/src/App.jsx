@@ -5,7 +5,7 @@ import {
   Shield, Activity, ChevronDown, ChevronRight, Zap, Search, LogOut, Plus, Trash2,
   GitBranch, FolderOpen, Cloud, ExternalLink, Monitor, Code2,
   Folder, FileCode, Copy, RefreshCw, GitMerge, Bell, AlertTriangle, CheckSquare,
-  BookOpen, ArrowDownToLine, MessageCircle, FileText, List, Hash,
+  BookOpen, ArrowDownToLine, MessageCircle, FileText, List, Hash, Radio, Download,
 } from 'lucide-react'
 import { signInWithGoogle, logOut, onAuthChange, getIdToken } from './firebase'
 
@@ -76,6 +76,7 @@ const NAV_DESCRIPTIONS = {
   chat: 'Chat with your AI coworker about the project.',
   pipeline: 'Describe a requirement — AI picks the right teams and runs the pipeline.',
   group: 'Multi-team discussion on a topic.',
+  comms: 'Live feed of agent-to-agent communications: handoffs, context sharing, and clarifications.',
   preview: 'Live code preview of the last pipeline run — like Google AI Studio.',
   memory: 'Interactive knowledge graph of all artifacts.',
   settings: 'Configure AI models, budgets, API keys, and Git.',
@@ -908,6 +909,17 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   const [decisionsLoading, setDecisionsLoading] = useState(false)
   const [memoryDetailTab, setMemoryDetailTab] = useState('memory') // 'memory' | 'decisions'
 
+  /* Agent Comms state */
+  const [commsEvents, setCommsEvents] = useState([])
+  const [commsOffset, setCommsOffset] = useState(0)
+  const commsEndRef = useRef(null)
+  useEffect(() => { commsEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [commsEvents])
+
+  /* Clone Repo state */
+  const [cloneUrl, setCloneUrl] = useState('')
+  const [cloneLoading, setCloneLoading] = useState(false)
+  const [cloneResult, setCloneResult] = useState(null)
+
   const messagesEndRef = useRef(null)
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [chatHistory, pipelineHistory, groupHistory, taskStatus])
 
@@ -956,6 +968,7 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
     { key: 'chat', label: 'Project Chat', icon: MessageSquare },
     { key: 'pipeline', label: 'Run Pipeline', icon: Play },
     { key: 'preview', label: 'Live Preview', icon: Monitor },
+    { key: 'comms', label: 'Agent Comms', icon: Radio },
     { key: 'group', label: 'Group Chat', icon: Users },
     { key: 'merge', label: 'Merge Team', icon: GitMerge },
     { key: 'selfheal', label: 'Self Heal', icon: Activity },
@@ -985,6 +998,7 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
       id: Date.now(), role: 'user',
       text: isFollowup ? `✏️ Follow-up: ${requirement}` : requirement,
     }])
+    setCommsEvents([])  // clear previous comms when starting a new run
     const data = await handleApi(() => api('/api/pipelines/full/run/async', {
       method: 'POST', body: JSON.stringify(body),
     }))
@@ -997,11 +1011,22 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   useEffect(() => {
     if (!trackedTaskId) return
     let cancelled = false
+    let offset = 0
     const timer = setInterval(async () => {
       if (cancelled) return
       try {
         const data = await api(`/api/tasks/${trackedTaskId}`)
         setTaskStatus(data)
+        // Poll comms log incrementally (best-effort)
+        try {
+          const comms = await api(`/api/tasks/${trackedTaskId}/comms?since=${offset}`)
+          if (comms.events && comms.events.length > 0) {
+            setCommsEvents(prev => [...prev, ...comms.events])
+            offset += comms.events.length
+          }
+        } catch (commsErr) {
+          console.debug('Comms polling error:', commsErr)
+        }
         if (data.status === 'completed') {
           setPipelineHistory(prev => [...prev, {
             id: Date.now(), role: 'assistant',
@@ -1189,6 +1214,19 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
       setRepoLearned(data)
     } catch (e) { setError(e.message) }
     finally { setRepoLearning(false) }
+  }
+
+  /* ─── Clone External Repo ─── */
+  async function cloneExternalRepo() {
+    if (!cloneUrl.trim()) return
+    setCloneLoading(true); setCloneResult(null)
+    try {
+      const data = await api(`/api/projects/${projectId}/git/clone`, {
+        method: 'POST', body: JSON.stringify({ clone_url: cloneUrl.trim(), branch: 'main' }),
+      })
+      setCloneResult(data)
+    } catch (e) { setError(e.message) }
+    finally { setCloneLoading(false) }
   }
 
   /* ─── Memory Bank Detail ─── */
@@ -1441,6 +1479,9 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                 }}
                 title={NAV_DESCRIPTIONS[item.key]}>
                 <Icon size={18} />{item.label}
+                {item.key === 'comms' && commsEvents.length > 0 && (
+                  <span className="notifBadge" style={{ marginLeft: 'auto', fontSize: 10 }}>{commsEvents.length}</span>
+                )}
               </button>
             )
           })}
@@ -1492,6 +1533,11 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                 <div className="previewBanner">
                   <CheckCircle2 size={15} />
                   <span>Pipeline complete! Generated code is ready to preview.</span>
+                  {commsEvents.length > 0 && (
+                    <button className="previewBannerBtn" onClick={() => setActiveTab('comms')} style={{ background: '#7c3aed' }}>
+                      <Radio size={13} /> {commsEvents.length} Comms Events →
+                    </button>
+                  )}
                   <button className="previewBannerBtn" onClick={() => setActiveTab('preview')}>
                     <Monitor size={13} /> View Live Preview →
                   </button>
@@ -1542,6 +1588,63 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                 </div>
               </div>
               <div className="messagesList">{groupHistory.map(renderMessage)}<div ref={messagesEndRef} /></div>
+            </div>
+          )}
+
+          {/* Agent Comms */}
+          {activeTab === 'comms' && (
+            <div className="commsContainer">
+              {commsEvents.length === 0 ? (
+                <div className="commsEmptyState">
+                  <Radio size={36} style={{ color: '#cbd5e1', marginBottom: 8 }} />
+                  <p style={{ fontWeight: 600, color: 'var(--text2)' }}>No communications yet</p>
+                  <span>Run a pipeline to see live agent-to-agent handoffs, context sharing, and clarifications here.</span>
+                  {taskStatus?.status === 'running' && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--primary)', marginTop: 8 }}>
+                      <Loader2 size={14} className="spin" /> Waiting for pipeline events…
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="commsTimeline">
+                  {commsEvents.map((evt, i) => {
+                    const typeIcons = {
+                      handoff: '→',
+                      context: '📋',
+                      status: '⚡',
+                      clarification: '❓',
+                    }
+                    return (
+                      <div key={i} className={`commsEvent type-${evt.type}`}>
+                        <div className="commsEventIcon">{typeIcons[evt.type] || '💬'}</div>
+                        <div className="commsEventBody">
+                          <div className="commsEventHeader">
+                            <span className="commsFrom">{formatTeamName(evt.from_team)}</span>
+                            <span className="commsArrow">→</span>
+                            <span className="commsTo">{evt.to_team === 'none' ? 'Done' : formatTeamName(evt.to_team)}</span>
+                            <span className="commsTypeBadge">{evt.type}</span>
+                            <span className="commsTs">{new Date(evt.ts).toLocaleTimeString()}</span>
+                          </div>
+                          <div className="commsMessage">{evt.message}</div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                  <div ref={commsEndRef} />
+                </div>
+              )}
+              <div className="commsLiveIndicator">
+                {taskStatus?.status === 'running'
+                  ? <><div className="commsLiveDot" /> Live — updating as agents communicate</>
+                  : <><Clock size={11} /> {commsEvents.length} events recorded</>
+                }
+                {commsEvents.length > 0 && (
+                  <button className="linkBtn" style={{ marginLeft: 'auto' }}
+                    onClick={() => { setCommsEvents([]); setCommsOffset(0) }}>
+                    Clear
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
@@ -1752,6 +1855,41 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                         <button className="primaryBtn" onClick={saveGitConfig} disabled={!gitUrl.trim() || loading}>
                           <GitBranch size={14} /> Enable Git Mode
                         </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Clone External Repo Card */}
+                  <div className="card gitCard cloneRepoBox">
+                    <div className="cardHeader"><Download size={18} /><h4>Clone &amp; Build on Existing Repo</h4></div>
+                    <p className="fieldHint">
+                      Paste any public (or private, if token is set) GitHub repo URL. All pipeline agents will learn its
+                      codebase, tech stack, and conventions before generating code so they can build on top of it.
+                    </p>
+                    <div className="fieldRow">
+                      <label>External Repo URL</label>
+                      <input
+                        value={cloneUrl}
+                        onChange={e => setCloneUrl(e.target.value)}
+                        placeholder="https://github.com/owner/repo"
+                      />
+                    </div>
+                    <button className="primaryBtn" onClick={cloneExternalRepo} disabled={!cloneUrl.trim() || cloneLoading}>
+                      {cloneLoading ? <><Loader2 size={14} className="spin" /> Analyzing…</> : <><Download size={14} /> Clone &amp; Learn</>}
+                    </button>
+                    {cloneResult && (
+                      <div className="cloneRepoResult">
+                        <div className="cloneRepoResultHeader">
+                          <CheckCircle2 size={14} />
+                          <strong>{cloneResult.status === 'cloned' ? `✅ Analyzed ${cloneResult.files_analyzed} files from ${cloneResult.clone_url}` : `Error: ${cloneResult.error}`}</strong>
+                        </div>
+                        {cloneResult.notes_preview && <p className="repoLearnedPreview">{cloneResult.notes_preview}</p>}
+                        {cloneResult.file_tree && (
+                          <div className="repoLearnedFiles">
+                            {cloneResult.file_tree.slice(0, 15).map((f, i) => <span key={i} className="repoFileTag">{f}</span>)}
+                            {cloneResult.file_tree.length > 15 && <span className="repoFileTag">+{cloneResult.file_tree.length - 15} more</span>}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
