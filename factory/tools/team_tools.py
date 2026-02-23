@@ -65,14 +65,25 @@ TEAM_TOOLS: dict[str, TeamToolConfig] = {
         team="solution_arch",
         display_name="Solution Architecture",
         tools=[
-            "google_docs", "mermaid", "tavily_search", "plane",
-            "confluence", "openai", "wikipedia", "slack", "notification",
+            "google_docs", "google_sheets", "mermaid", "tavily_search", "plane",
+            "confluence", "openai", "wikipedia", "firecrawl", "slack", "notification",
         ],
-        artifacts=["Architecture Decision Record (ADR)", "System Architecture Doc", "C4 Diagrams", "Tech Stack Analysis"],
+        artifacts=[
+            "Architecture Decision Record (ADR)",
+            "System Architecture Doc",
+            "Tech Stack Decision Matrix (Sheet)",
+            "C4 Context + Component Diagrams",
+            "Tech Research Report",
+            "Per-Team Handoff Notes",
+        ],
         output_target="google_docs",
+        secondary_target="google_sheets",
         description=(
-            "Writes ADRs and arch docs in Google Docs + Confluence, generates Mermaid C4/sequence diagrams, "
-            "uses OpenAI for tech spike analysis, researches via Tavily/Wikipedia"
+            "Performs extensive research (5 Tavily queries + Firecrawl + Wikipedia) on UI stack, backend, "
+            "cloud infra, security, and reference architectures. Writes ADR + per-team handoff notes in "
+            "Google Docs + Confluence. Produces Tech Stack Decision Matrix in Sheets. "
+            "Generates C4 context + component Mermaid diagrams. Uses OpenAI for tech spike analysis. "
+            "Tracks ADRs in Plane. Notifies all teams via Slack with handoff instructions."
         ),
     ),
     "api_design": TeamToolConfig(

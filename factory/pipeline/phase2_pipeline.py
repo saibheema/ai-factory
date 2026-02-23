@@ -27,10 +27,20 @@ EXECUTION_WAVES: list[list[str]] = [
     ["docs_team", "feature_eng"],                                             # Wave 7: docs & closure
 ]
 
-# Teams whose output is worth sharing as upstream context to later teams
+# Teams whose output is worth sharing as upstream context to later teams.
+# ALL key decision-making and implementation teams contribute to the shared KB so
+# downstream teams always build on concrete prior decisions, not thin summaries.
 _KNOWLEDGE_PRODUCERS = frozenset({
-    "product_mgmt", "biz_analysis", "solution_arch",
-    "api_design", "ux_ui", "security_eng",
+    "product_mgmt",   # MVP scope + features
+    "biz_analysis",   # Acceptance criteria
+    "solution_arch",  # ADR + tech stack (most critical — runs solo in wave 2)
+    "api_design",     # API contract
+    "ux_ui",          # Screen inventory + design tokens
+    "backend_eng",    # Endpoint implementations + auth patterns
+    "database_eng",   # Schema + migration decisions
+    "devops",         # CI/CD + container + cloud config
+    "security_eng",   # Threat model + auth controls
+    "qa_eng",         # Quality gates + test strategy
 })
 
 
@@ -88,7 +98,7 @@ class Phase2Pipeline:
         knowledge_log: list[str] = []
 
         def _build_shared_knowledge() -> str:
-            return "\n\n".join(knowledge_log[-6:])
+            return "\n\n".join(knowledge_log[-10:])
 
         def _run_team(team: str, shared_knowledge: str) -> tuple[str, object]:
             bank_id = f"team-{team}"
@@ -143,15 +153,18 @@ class Phase2Pipeline:
                         )
                     )
 
-            # After the wave completes, harvest knowledge from key producers
+            # After the wave completes, harvest knowledge from key producers.
+            # Solution Arch is the most critical — capture its full ADR content.
             for team in wave_teams:
                 if team in _KNOWLEDGE_PRODUCERS:
                     stage = wave_stages.get(team)
                     rationale = getattr(stage, "decision_rationale", "") or ""
                     title = getattr(stage, "decision_title", team) or team
+                    # Sol Arch ADR is the foundation — give it 3x the space
+                    max_chars = 3000 if team == "solution_arch" else 1500
                     if rationale:
                         knowledge_log.append(
-                            f"[{team.replace('_', ' ').title()}] {title}:\n{rationale[:500]}"
+                            f"[{team.replace('_', ' ').title()}] {title}:\n{rationale[:max_chars]}"
                         )
 
         # Sort outputs to match the canonical team ordering

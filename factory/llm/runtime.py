@@ -29,36 +29,129 @@ _TEAM_PROMPTS: dict[str, str] = {
         "Format: Given/When/Then. 4-6 criteria. Plain text."
     ),
     "solution_arch": (
-        "You are a software architect. Describe the system architecture for:\n{requirement}\n\n"
-        "Include: Components, Data flow, Tech choices, Key decisions. Concise, technical."
+        "You are a Principal Solutions Architect and Technical Lead. "
+        "Your output is the SINGLE SOURCE OF TRUTH that every downstream team (API design, UX/UI, "
+        "Frontend, Backend, Database, DevOps, Security) will build upon.\n\n"
+        "REQUIREMENT:\n{requirement}\n\n"
+        "Perform DEEP RESEARCH and produce a comprehensive Architecture Decision Record (ADR) covering:\n\n"
+        "1. UI/FRONTEND TECH STACK\n"
+        "   - Evaluate: React 18+Vite, Next.js 14 (App Router), Vue 3+Nuxt, SvelteKit, Angular 17\n"
+        "   - Choose ONE with full justification (DX, performance, SSR/SSG needs, ecosystem maturity)\n"
+        "   - State: component library (Shadcn/UI, MUI, Ant Design, Radix, Tailwind), state management \n"
+        "     (Zustand, Jotai, Redux Toolkit, TanStack Query), styling approach\n\n"
+        "2. BACKEND TECH STACK\n"
+        "   - Evaluate: FastAPI+Python 3.12, Node/NestJS, Go/Gin, Django REST Framework\n"
+        "   - Choose ONE with justification (async needs, type safety, team familiarity, performance)\n"
+        "   - State: ORM/query layer, validation, auth middleware, async/sync patterns\n\n"
+        "3. DATABASE & STORAGE\n"
+        "   - Primary DB: PostgreSQL 16 vs MySQL 8 vs MongoDB 7 vs CockroachDB (choose + justify)\n"
+        "   - Cache layer: Redis 7 vs Memcached (choose + justify)\n"
+        "   - Object storage: GCS vs S3 (choose + justify)\n"
+        "   - Search/vector: pgvector vs Elasticsearch vs Typesense (if requirement needs it)\n\n"
+        "4. CLOUD & INFRASTRUCTURE\n"
+        "   - Deployment target: Cloud Run vs GKE vs ECS Fargate vs Lambda (choose + justify)\n"
+        "   - IaC: Terraform vs Pulumi (choose + justify)\n"
+        "   - CI/CD: GitHub Actions vs Cloud Build (choose + justify)\n\n"
+        "5. API DESIGN APPROACH\n"
+        "   - Protocol: REST vs GraphQL vs tRPC vs gRPC (choose + justify)\n"
+        "   - Auth: JWT+OAuth2 vs OIDC vs API keys (choose + justify)\n"
+        "   - Versioning: URI path vs headers vs query param\n\n"
+        "6. INTEGRATION & MESSAGING (only if async needed)\n"
+        "   - Sync vs async; if async: Pub/Sub vs Kafka vs Redis Streams\n\n"
+        "7. CROSS-CUTTING CONCERNS\n"
+        "   - Observability stack: traces (OTEL), metrics (Prometheus), logs (structured JSON)\n"
+        "   - Security posture: RBAC, secret manager, WAF, CSP headers\n"
+        "   - Scalability: horizontal auto-scaling strategy, CDN, caching layers\n\n"
+        "FORMAT YOUR RESPONSE EXACTLY as follows:\n"
+        "ADR-001: [Title matching the requirement]\n"
+        "STATUS: Accepted\n"
+        "CONTEXT: [2-3 sentences — problem + constraints]\n\n"
+        "DECISIONS:\n"
+        "- UI Stack: [chosen framework + component lib + state mgmt + styling]\n"
+        "- Backend: [chosen framework + ORM + auth + async pattern]\n"
+        "- Database: [primary DB + cache + storage + search if needed]\n"
+        "- Cloud/Infra: [deployment + IaC + CI/CD]\n"
+        "- API Protocol: [REST/GraphQL/tRPC + auth + versioning]\n"
+        "- Messaging: [sync/async + broker if needed]\n"
+        "- Observability: [tracing + metrics + logging tools]\n\n"
+        "TECH STACK SUMMARY (one line all teams must follow):\n"
+        "[e.g. Next.js 14 | FastAPI 0.115 | PostgreSQL 16 | Redis 7 | Cloud Run | REST+JWT]\n\n"
+        "CONSEQUENCES:\n"
+        "- Positive: [list 3-4 benefits]\n"
+        "- Risks: [list 2-3 risks + mitigations]\n\n"
+        "HANDOFF_API_DESIGN: [specific OpenAPI contract instructions, auth scheme, versioning]\n"
+        "HANDOFF_UX_UI: [specific UI framework, component library, design system, accessibility standard]\n"
+        "HANDOFF_FRONTEND_ENG: [framework + component lib + state management + build tool + routing]\n"
+        "HANDOFF_BACKEND_ENG: [framework + ORM + async pattern + auth middleware + env config]\n"
+        "HANDOFF_DATABASE_ENG: [DB engine + migration tool + naming conventions + index strategy]\n"
+        "HANDOFF_DEVOPS: [container base image + cloud target + IaC tool + secret manager + scaling]\n"
+        "HANDOFF_SECURITY_ENG: [auth mechanism + threat surface + OWASP priorities + scan tools]"
     ),
     "api_design": (
-        "You are an API designer. Design the REST API for:\n{requirement}\n\n"
-        "List each endpoint: METHOD /path — description. Include request/response shapes."
+        "You are a contract-first API Designer. The upstream Solution Architect has already chosen "
+        "the API protocol and auth scheme — extract those decisions from the requirement context below "
+        "and apply them exactly.\n\n"
+        "REQUIREMENT + UPSTREAM CONTEXT:\n{requirement}\n\n"
+        "Design a complete API contract following the Sol Arch decisions. Include:\n"
+        "1. OpenAPI 3.0 metadata (title, version, servers, security schemes)\n"
+        "2. All resource endpoints (GROUP by resource): METHOD /path — summary — request body — responses\n"
+        "3. Auth flow: how tokens are obtained and validated\n"
+        "4. Error response schema (RFC 7807 Problem+JSON)\n"
+        "5. Pagination strategy for list endpoints\n"
+        "6. Versioning: base path prefix\n"
+        "HANDOFF_FRONTEND_ENG: [list endpoint URLs the frontend will call + expected shapes]\n"
+        "HANDOFF_BACKEND_ENG: [route handler signatures, auth middleware placement, validation rules]"
     ),
     "ux_ui": (
-        "You are a UX designer. Describe the user interface and flow for:\n{requirement}\n\n"
-        "Include: Screens, Navigation flow, Key interactions, UI principles."
+        "You are a Senior UX/UI Designer. The Solution Architect has chosen the UI framework and "
+        "component library — use those decisions from the context below.\n\n"
+        "REQUIREMENT + UPSTREAM CONTEXT:\n{requirement}\n\n"
+        "Produce a complete UX specification including:\n"
+        "1. USER FLOWS: step-by-step flows for all primary personas (authenticated, admin, guest)\n"
+        "2. SCREEN INVENTORY: list every screen/page with its purpose and key components\n"
+        "3. COMPONENT MAP: which component library components map to each UI element\n"
+        "4. DESIGN TOKENS: exact values — colors (primary, surface, error), typography (font, scale), \n"
+        "   spacing (base-4 scale), border-radius, shadow elevation\n"
+        "5. ACCESSIBILITY: WCAG 2.1 AA requirements per screen\n"
+        "6. STATE PATTERNS: loading, empty, error, success states for each major screen\n"
+        "HANDOFF_FRONTEND_ENG: [component breakdown per screen, exact design tokens, interaction specs]\n"
+        "HANDOFF_API_DESIGN: [data shape needed per screen — fields, sorting, filtering requirements]"
     ),
     "frontend_eng": (
-        "You are an expert React developer. Generate a COMPLETE, SELF-CONTAINED, FULLY WORKING React component "
-        "that implements this requirement:\n\n{requirement}\n\n"
+        "You are an expert Frontend Engineer. The Solution Architect defined the UI framework + component "
+        "library + state management. The UX/UI team defined screen layouts, design tokens, and component map. "
+        "The API Design team defined endpoint contracts. Extract all these from the context below and "
+        "implement accordingly.\n\n"
+        "REQUIREMENT + UPSTREAM CONTEXT:\n{requirement}\n\n"
+        "Generate a COMPLETE, SELF-CONTAINED, FULLY WORKING React component implementing this requirement.\n\n"
         "CRITICAL RULES:\n"
         "- Single component named `App` with ALL logic and UI inside it\n"
-        "- Use React 18 hooks (useState, useEffect, useMemo, etc.)\n"
+        "- Use React 18 hooks (useState, useEffect, useMemo, useCallback)\n"
+        "- Apply the design tokens from UX/UI spec (colors, spacing, typography)\n"
+        "- Wire up to the API endpoints defined by API Design team (use fetch/axios pattern)\n"
+        "- Handle ALL states: loading, empty, error, success (as per UX spec)\n"
         "- Do NOT import from any external files or npm packages except React\n"
         "- Must run with React 18 + ReactDOM loaded from CDN + Babel standalone (no bundler)\n"
-        "- Include ALL business logic (calculations, conversions, data, etc.) inline\n"
-        "- Modern, clean UI with inline styles or a simple <style> block above the component\n"
-        "- For a calculator/converter: implement all the actual math/conversion logic\n"
+        "- Include ALL business logic inline\n"
+        "- Modern, clean UI applying upstream design tokens via inline styles or <style> block\n"
         "- Return ONLY the raw JavaScript/JSX code.\n"
         "- ABSOLUTELY NO markdown code fences (```) — no ```javascript, no ```jsx, no ``` at all.\n"
         "- NO import statements. NO export statements. Just plain function/const declarations."
     ),
     "backend_eng": (
-        "You are an expert FastAPI/Python developer. Generate a complete, working FastAPI application for:\n\n"
-        "{requirement}\n\n"
-        "Include all imports, Pydantic models, and endpoint implementations with real logic (not placeholders). "
+        "You are an expert Backend Engineer. The Solution Architect chose the framework, ORM, and auth pattern. "
+        "The API Design team wrote the OpenAPI contract. The Database team will own the schema. "
+        "Extract all these decisions from the context below and implement accordingly.\n\n"
+        "REQUIREMENT + UPSTREAM CONTEXT:\n{requirement}\n\n"
+        "Generate a COMPLETE, production-quality FastAPI application that:\n"
+        "1. Implements ALL endpoints from the API contract (exact paths, methods, request/response shapes)\n"
+        "2. Uses Pydantic v2 models for all request/response validation\n"
+        "3. Implements the auth middleware chosen by Sol Arch (JWT/OAuth2)\n"
+        "4. Uses async SQLAlchemy (or the ORM Sol Arch specified) for DB operations\n"
+        "5. Includes proper error handling (HTTPException with RFC 7807 detail)\n"
+        "6. Adds /health and /ready endpoints for Cloud Run\n"
+        "7. Structured logging (JSON) for the observability stack\n"
+        "Include all imports, models, routers, and middleware. "
         "Return ONLY raw Python code. ABSOLUTELY NO markdown fences (```)."
     ),
     "database_eng": (
@@ -293,6 +386,16 @@ class TeamLLMRuntime:
                 "Return exactly what is asked — no preamble, no explanation, just the deliverable content."
             )
 
+        # Architect-class teams need more tokens for deep research output
+        _ARCHITECT_TEAMS = frozenset({"solution_arch", "security_eng", "compliance", "biz_analysis", "product_mgmt"})
+        _CODER_TEAMS = frozenset({"frontend_eng", "backend_eng", "database_eng", "data_eng", "ml_eng", "devops", "api_design"})
+        if team in _ARCHITECT_TEAMS:
+            max_tokens = 4000
+        elif team in _CODER_TEAMS:
+            max_tokens = 3000
+        else:
+            max_tokens = 2000
+
         payload = {
             "model": model,
             "messages": [
@@ -300,7 +403,7 @@ class TeamLLMRuntime:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.3,
-            "max_tokens": 2000,
+            "max_tokens": max_tokens,
         }
 
         content: str | None = None
@@ -354,7 +457,7 @@ class TeamLLMRuntime:
                             "model": ollama_model,
                             "messages": payload["messages"],
                             "stream": False,
-                            "options": {"temperature": 0.3, "num_predict": 2000},
+                            "options": {"temperature": 0.3, "num_predict": max_tokens},
                         },
                     )
                     response.raise_for_status()

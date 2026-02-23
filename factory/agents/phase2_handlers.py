@@ -461,11 +461,107 @@ def _gen_biz_analysis(requirement: str, llm_content: str) -> dict:
 
 
 def _gen_solution_arch(requirement: str, llm_content: str) -> dict:
+    """Solution Architecture generator: extensive research + ADR + tech decision matrix.
+
+    Produces:
+    - Google Doc: Architecture Decision Record (full ADR)
+    - Google Sheet: Tech Stack Decision Matrix with pros/cons per option
+    - Multiple Tavily searches: UI stack, backend stack, cloud infra, security patterns,
+      similar app reference architectures
+    - Mermaid C4 system context + component diagram
+    - Explicit per-team handoff sections (extracted from LLM output)
+    """
+    # ── Extract per-team HANDOFF sections from LLM output ────────────────────
+    import re as _re
+
+    def _extract_handoff(key: str, text: str) -> str:
+        """Pull HANDOFF_<KEY>: line from LLM output."""
+        m = _re.search(rf"HANDOFF_{key}:\s*(.+?)(?=\nHANDOFF_|\nCONSEQUENCES|\nTECH STACK|$)",
+                       text, _re.IGNORECASE | _re.DOTALL)
+        return m.group(1).strip() if m else ""
+
+    handoff_api   = _extract_handoff("API_DESIGN",   llm_content)
+    handoff_ux    = _extract_handoff("UX_UI",        llm_content)
+    handoff_fe    = _extract_handoff("FRONTEND_ENG", llm_content)
+    handoff_be    = _extract_handoff("BACKEND_ENG",  llm_content)
+    handoff_db    = _extract_handoff("DATABASE_ENG", llm_content)
+    handoff_devop = _extract_handoff("DEVOPS",       llm_content)
+    handoff_sec   = _extract_handoff("SECURITY_ENG", llm_content)
+
+    # ── Tech Stack Decision Matrix rows ──────────────────────────────────────
+    sheet_rows = [
+        ["UI Framework",  "React 18+Vite / Next.js 14 / Vue 3 / SvelteKit", "Chosen per ADR-001",
+         handoff_fe[:80] or "See ADR-001", "Frontend Eng"],
+        ["Backend",       "FastAPI / NestJS / Go-Gin / Django REST",          "Chosen per ADR-001",
+         handoff_be[:80] or "See ADR-001", "Backend Eng"],
+        ["Database",      "PostgreSQL 16 / MySQL 8 / MongoDB 7",             "Chosen per ADR-001",
+         handoff_db[:80] or "See ADR-001", "Database Eng"],
+        ["Cache",         "Redis 7 / Memcached",                              "Chosen per ADR-001",
+         "See ADR-001", "Backend Eng"],
+        ["Cloud Deploy",  "Cloud Run / GKE / ECS Fargate",                   "Chosen per ADR-001",
+         handoff_devop[:80] or "See ADR-001", "DevOps"],
+        ["IaC",           "Terraform / Pulumi",                               "Chosen per ADR-001",
+         "See ADR-001", "DevOps"],
+        ["API Protocol",  "REST / GraphQL / tRPC",                           "Chosen per ADR-001",
+         handoff_api[:80] or "See ADR-001", "API Design"],
+        ["Auth",          "JWT+OAuth2 / OIDC / API Keys",                    "Chosen per ADR-001",
+         handoff_sec[:80] or "See ADR-001", "Security Eng"],
+        ["CI/CD",         "GitHub Actions / Cloud Build",                    "Chosen per ADR-001",
+         "See ADR-001", "DevOps"],
+        ["Observability", "OTEL traces / Prometheus / structured JSON logs", "Standard",
+         "All teams instrument", "SRE Ops"],
+    ]
+
+    handoff_section = (
+        f"\n\n## Per-Team Handoff Notes\n"
+        f"### → API Design\n{handoff_api or '(see Decisions section)'}\n\n"
+        f"### → UX / UI\n{handoff_ux or '(see Decisions section)'}\n\n"
+        f"### → Frontend Eng\n{handoff_fe or '(see Decisions section)'}\n\n"
+        f"### → Backend Eng\n{handoff_be or '(see Decisions section)'}\n\n"
+        f"### → Database Eng\n{handoff_db or '(see Decisions section)'}\n\n"
+        f"### → DevOps\n{handoff_devop or '(see Decisions section)'}\n\n"
+        f"### → Security Eng\n{handoff_sec or '(see Decisions section)'}"
+    )
+
     return {
-        "doc_title": "ADR — Architecture Decision Record",
-        "doc_content": f"# Architecture Decision Record\n\n## Context\n{requirement}\n\n{llm_content}\n\n## Decision\nSelected architecture pattern based on requirements analysis.\n\n## Consequences\n- Positive: Scalable, maintainable, observable\n- Negative: Initial complexity, learning curve",
-        "search_query": f"software architecture patterns for {requirement[:50]}",
-        "mermaid": ("flowchart", "System Architecture", f"graph TB\n    Client[Client App] --> LB[Load Balancer]\n    LB --> API[API Gateway]\n    API --> Auth[Auth Service]\n    API --> Core[Core Service]\n    Core --> DB[(Database)]\n    Core --> Cache[(Cache)]\n    Core --> Queue[Message Queue]\n    Queue --> Worker[Worker Service]"),
+        "doc_title": "ADR-001 — Architecture Decision Record",
+        "doc_content": (
+            f"# Architecture Decision Record\n\n"
+            f"## Context\n{requirement}\n\n"
+            f"{llm_content}\n"
+            f"{handoff_section}\n\n"
+            f"## Consequences\n"
+            f"- Positive: Aligned stack, clear ownership, traceable decisions\n"
+            f"- Negative: Initial ramp-up; teams must read this ADR before starting"
+        ),
+        # Multiple Tavily research queries — executed sequentially
+        "search_queries": [
+            f"best UI framework 2025 React Next.js Vue SvelteKit comparison {requirement[:40]}",
+            f"FastAPI vs NestJS vs Django REST performance comparison 2025",
+            f"Cloud Run vs GKE vs ECS Fargate cost performance 2025",
+            f"microservices vs monolith architecture {requirement[:40]} best practices",
+            f"OWASP top 10 security controls REST API {requirement[:35]}",
+        ],
+        # Tech decision matrix spreadsheet
+        "sheet_title": "Tech Stack Decision Matrix",
+        "sheet_headers": ["Area", "Options Evaluated", "Decision", "Rationale / Constraints", "Owner"],
+        "sheet_rows": sheet_rows,
+        # C4 system context diagram
+        "mermaid": (
+            "flowchart",
+            "System Architecture — C4 Context",
+            "graph TB\n"
+            "    User([User / Browser]) --> FE[Frontend — SPA/SSR]\n"
+            "    FE --> GW[API Gateway / Load Balancer]\n"
+            "    GW --> Auth[Auth Service — JWT/OAuth2]\n"
+            "    GW --> API[Backend API Service]\n"
+            "    API --> DB[(Primary DB — PostgreSQL)]\n"
+            "    API --> Cache[(Redis Cache)]\n"
+            "    API --> MQ[Message Queue — optional async]\n"
+            "    MQ --> Worker[Worker / Consumer Service]\n"
+            "    API --> OBS[Observability — OTEL + Prometheus]\n"
+            "    Worker --> DB"
+        ),
     }
 
 
@@ -848,9 +944,13 @@ def run_phase2_handler(
     # 4. Execute tools
     tools_used: list[ToolExecution] = []
 
-    # Tavily search (if team uses it)
-    if tool_cfg and "tavily_search" in tool_cfg.tools and gen_data.get("search_query"):
-        tools_used.append(_execute_tavily(team, gen_data["search_query"]))
+    # Tavily search (single query or multiple research queries for deep-research teams)
+    if tool_cfg and "tavily_search" in tool_cfg.tools:
+        queries: list[str] = gen_data.get("search_queries") or []  # type: ignore[assignment]
+        if not queries and gen_data.get("search_query"):
+            queries = [gen_data["search_query"]]
+        for _q in queries:
+            tools_used.append(_execute_tavily(team, _q))
 
     # Mermaid diagrams
     if tool_cfg and "mermaid" in tool_cfg.tools and gen_data.get("mermaid"):
@@ -862,7 +962,7 @@ def run_phase2_handler(
         doc_title = f"[{project_id or 'project'}] {gen_data['doc_title']}"
         tools_used.append(_execute_google_docs(team, doc_title, gen_data["doc_content"], folder_id))
 
-    # Google Sheets
+    # Google Sheets (includes solution_arch tech decision matrix)
     if tool_cfg and "google_sheets" in tool_cfg.tools and gen_data.get("sheet_title"):
         sheet_title = f"[{project_id or 'project'}] {gen_data['sheet_title']}"
         tools_used.append(_execute_google_sheets(
