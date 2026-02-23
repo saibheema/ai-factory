@@ -4,7 +4,8 @@ Every team:
  1. Gets its tool config from team_tools.py
  2. Generates content via LLM (or deterministic fallback)
  3. Executes the assigned tools (Google Docs, Sheets, Git, GCS, Mermaid, Tavily)
- 4. Returns a structured artifact with tool execution log
+ 4. Dispatches any [@team: message] actor mentions in the LLM output
+ 5. Returns a structured artifact with tool execution log
 """
 
 import logging
@@ -43,6 +44,10 @@ class Phase2StageArtifact:
     code_files: dict[str, str] = field(default_factory=dict)  # filename → content
     qa_issues: list[str] = field(default_factory=list)
     qa_verdict: str = ""
+    # Decision log metadata — populated by run_phase2_handler
+    decision_type: str = ""       # e.g. "ADR", "threat_model", "acceptance_criteria"
+    decision_title: str = ""      # short title for the decision card
+    decision_rationale: str = ""  # extracted reasoning / action taken
 
 
 def extract_handoff_to(artifact: str) -> str:
@@ -95,6 +100,179 @@ def _execute_tavily(team: str, query: str) -> ToolExecution:
         return ToolExecution(tool="tavily_search", action=f"Research: {query[:60]}", success=False, error=str(e))
 
 
+def _execute_plane(
+    team: str,
+    project_id: str,
+    requirement: str,
+    issue_title: str,
+    decision_type: str,
+    artifact_summary: str,
+) -> ToolExecution:
+    """Create a Plane (Jira-like) issue to track this team's pipeline stage."""
+    try:
+        from factory.tools.plane_tool import get_or_create_project, create_issue
+        import re as _re
+
+        plane_project_name = f"AI Factory: {project_id}"
+        ident = _re.sub(r"[^A-Z0-9]", "", project_id.upper())[:5] or "AIFAC"
+        plane_pid = get_or_create_project(plane_project_name, ident)
+        if not plane_pid:
+            return ToolExecution(
+                tool="plane", action="Issue skipped (no Plane project)",
+                success=False, error="Could not get/create Plane project",
+            )
+
+        priority_map = {
+            "ADR": "high", "threat_model": "urgent", "compliance": "high",
+            "deployment": "high", "test_plan": "high", "feature": "medium",
+            "api_contract": "high", "acceptance_criteria": "medium",
+        }
+        priority = priority_map.get(decision_type, "medium")
+        title = issue_title[:200] if issue_title else f"[{team}] {requirement[:80]}"
+        desc = (
+            f"**Team:** {team}\n"
+            f"**Decision Type:** {decision_type}\n"
+            f"**Requirement:** {requirement[:300]}\n\n"
+            f"**Artifact Summary:**\n{artifact_summary[:500]}"
+        )
+        result = create_issue(
+            project_id=plane_pid,
+            title=title,
+            description=desc,
+            priority=priority,
+        )
+        seq = result.get("sequence_id", "?")
+        url = result.get("issue_url", "")
+        return ToolExecution(
+            tool="plane",
+            action=f"Issue #{seq}: {title[:60]}",
+            result={**result, "issue_url": url},
+            success=bool(result.get("issue_id")),
+        )
+    except Exception as e:
+        log.debug("Plane issue creation skipped for %s: %s", team, e)
+        return ToolExecution(
+            tool="plane", action=f"Issue for {team} (Plane unavailable)",
+            success=False, error=str(e),
+        )
+
+
+def _execute_notification(
+    team: str, project_id: str, requirement: str, artifact_summary: str
+) -> ToolExecution:
+    """Send a stage-complete notification via ntfy / Slack / webhook."""
+    try:
+        from factory.tools.notification_tool import notify
+        result = notify(
+            title=f"✅ {team} — {project_id or 'pipeline'}",
+            message=f"Requirement: {requirement[:150]}\n\n{artifact_summary[:200]}",
+            tags=[team, project_id or "pipeline", "stage-complete"],
+            priority="default",
+        )
+        channels = result.get("channels", [])
+        return ToolExecution(
+            tool="notification",
+            action=f"Notified via {', '.join(channels) or 'no channels configured'}",
+            result=result,
+            success=True,
+        )
+    except Exception as e:
+        return ToolExecution(
+            tool="notification", action="Notify stage complete",
+            success=False, error=str(e),
+        )
+
+
+def _execute_semgrep(team: str, code_files: dict[str, str]) -> ToolExecution:
+    """Run Semgrep SAST scan on generated code files."""
+    if not code_files:
+        return ToolExecution(
+            tool="semgrep", action="No code files to scan",
+            success=True, result={"passed": True, "finding_count": 0},
+        )
+    try:
+        from factory.tools.semgrep_tool import scan_code
+        all_findings: list[dict] = []
+        for fname, code in code_files.items():
+            lang = (
+                "javascript"
+                if fname.endswith((".js", ".jsx", ".ts", ".tsx"))
+                else "python"
+            )
+            result = scan_code(code, language=lang, filename=fname)
+            all_findings.extend(result.get("findings", []))
+        total = len(all_findings)
+        passed = total == 0
+        return ToolExecution(
+            tool="semgrep",
+            action=f"SAST: {'PASS' if passed else 'FAIL'} ({total} findings, {len(code_files)} files)",
+            result={"passed": passed, "finding_count": total, "findings": all_findings[:10]},
+            success=passed,
+        )
+    except Exception as e:
+        return ToolExecution(tool="semgrep", action="SAST scan", success=False, error=str(e))
+
+
+def _execute_trivy_iac(team: str, code_files: dict[str, str]) -> ToolExecution:
+    """Run Trivy IaC/secrets scan on Dockerfile and YAML config files."""
+    import os as _os, tempfile as _tempfile
+
+    iac_files = {
+        k: v for k, v in code_files.items()
+        if any(k.lower().endswith(ext) for ext in ("dockerfile", ".yaml", ".yml", ".tf"))
+        or "dockerfile" in k.lower()
+    }
+    if not iac_files:
+        return ToolExecution(
+            tool="trivy", action="No IaC files to scan",
+            success=True, result={"passed": True, "misconfig_count": 0},
+        )
+    try:
+        from factory.tools.trivy_tool import scan_iac
+        with _tempfile.TemporaryDirectory(prefix="aifactory-trivy-") as tmp:
+            for fname, content in iac_files.items():
+                fpath = _os.path.join(tmp, _os.path.basename(fname) or "scan.yaml")
+                with open(fpath, "w") as fh:
+                    fh.write(content)
+            result = scan_iac(tmp)
+        count = result.get("misconfig_count", 0)
+        passed = result.get("passed", True)
+        return ToolExecution(
+            tool="trivy",
+            action=f"IaC scan: {'PASS' if passed else 'FAIL'} ({count} misconfigs, {len(iac_files)} files)",
+            result=result,
+            success=passed,
+        )
+    except Exception as e:
+        return ToolExecution(tool="trivy", action="IaC scan", success=False, error=str(e))
+
+
+def _execute_ruff(team: str, code_files: dict[str, str]) -> ToolExecution:
+    """Lint Python code files with Ruff."""
+    py_files = {k: v for k, v in code_files.items() if k.endswith(".py")}
+    if not py_files:
+        return ToolExecution(
+            tool="ruff", action="No Python files to lint",
+            success=True, result={"passed": True, "violation_count": 0},
+        )
+    try:
+        from factory.tools.ruff_tool import lint_code
+        all_violations: list[dict] = []
+        for fname, code in py_files.items():
+            result = lint_code(code, filename=fname)
+            all_violations.extend(result.get("violations", []))
+        total = len(all_violations)
+        passed = total == 0
+        return ToolExecution(
+            tool="ruff",
+            action=f"Lint: {'PASS' if passed else f'{total} violations'} ({len(py_files)} files)",
+            result={"passed": passed, "violation_count": total, "violations": all_violations[:20]},
+            success=passed,
+        )
+    except Exception as e:
+        return ToolExecution(tool="ruff", action="Ruff lint", success=False, error=str(e))
+
+
 def _execute_git(team: str, git_url: str, git_token: str, project_id: str, files: dict[str, str]) -> ToolExecution:
     """Push files to Git."""
     try:
@@ -118,6 +296,138 @@ def _execute_gcs(team: str, uid: str, project_id: str, filename: str, content: s
     except Exception as e:
         log.warning("GCS upload failed for %s: %s", team, e)
         return ToolExecution(tool="gcs", action=f"Upload: {filename}", success=False, error=str(e))
+
+
+# ─── New tool executor helpers ────────────────────────────────────────────────
+
+def _execute_slack(team: str, project_id: str, summary: str, handoff_to: str = "") -> ToolExecution:
+    """Post stage-complete notification to Slack."""
+    try:
+        from factory.tools.slack_tool import send_stage_complete
+        result = send_stage_complete(
+            team=team,
+            project_id=project_id,
+            artifact_title=summary[:80],
+            handoff_to=handoff_to,
+        )
+        return ToolExecution(tool="slack", action=f"Stage complete → #{team}", result=result, success=result.get("ok", False))
+    except Exception as e:
+        log.debug("Slack notify skipped for %s: %s", team, e)
+        return ToolExecution(tool="slack", action="Stage complete", success=False, error=str(e))
+
+
+def _execute_bandit(team: str, code_files: dict[str, str]) -> ToolExecution:
+    """Run Bandit SAST on generated code files."""
+    try:
+        from factory.tools.bandit_tool import scan_code
+        combined = "\n\n".join(f"# --- {fname} ---\n{code}" for fname, code in code_files.items() if fname.endswith(".py"))
+        if not combined:
+            return ToolExecution(tool="bandit", action="Skipped (no Python files)", success=True)
+        result = scan_code(combined)
+        action = f"SAST: {result.get('total_issues', 0)} issues (H:{result.get('high', 0)} M:{result.get('medium', 0)})"
+        return ToolExecution(tool="bandit", action=action, result=result, success=result.get("passed", True))
+    except Exception as e:
+        return ToolExecution(tool="bandit", action="SAST scan", success=False, error=str(e))
+
+
+def _execute_gitleaks(team: str, code_files: dict[str, str]) -> ToolExecution:
+    """Run Gitleaks secret scan on code content."""
+    try:
+        from factory.tools.gitleaks_tool import scan_string
+        combined = "\n\n".join(f"# {fname}\n{code}" for fname, code in code_files.items())
+        result = scan_string(combined, rule_hint=f"{team}_generated_code")
+        action = f"Secret scan: {result.get('secret_count', 0)} secrets found"
+        return ToolExecution(tool="gitleaks", action=action, result=result, success=result.get("passed", True))
+    except Exception as e:
+        return ToolExecution(tool="gitleaks", action="Secret scan", success=False, error=str(e))
+
+
+def _execute_checkov(team: str, code_files: dict[str, str]) -> ToolExecution:
+    """Run Checkov on IaC/Kubernetes/Dockerfile content."""
+    try:
+        from factory.tools.checkov_tool import scan_inline
+        # Find any IaC files: .tf, .yaml, .yml, Dockerfile
+        iac_files = {f: c for f, c in code_files.items()
+                     if any(f.endswith(ext) for ext in (".tf", ".yaml", ".yml")) or "dockerfile" in f.lower()}
+        if not iac_files:
+            return ToolExecution(tool="checkov", action="Skipped (no IaC files)", success=True)
+        fname, content = next(iter(iac_files.items()))
+        framework = "terraform" if fname.endswith(".tf") else ("kubernetes" if "deploy" in fname else "dockerfile")
+        result = scan_inline(content, framework=framework, filename=fname)
+        action = f"IaC scan: passed={result.get('passed_count', 0)} failed={result.get('failed_count', 0)}"
+        return ToolExecution(tool="checkov", action=action, result=result, success=result.get("passed", True))
+    except Exception as e:
+        return ToolExecution(tool="checkov", action="IaC scan", success=False, error=str(e))
+
+
+def _execute_mypy(team: str, code_files: dict[str, str]) -> ToolExecution:
+    """Run mypy type checking on Python code."""
+    try:
+        from factory.tools.mypy_tool import check_code
+        py_files = {f: c for f, c in code_files.items() if f.endswith(".py")}
+        if not py_files:
+            return ToolExecution(tool="mypy", action="Skipped (no Python files)", success=True)
+        fname, code = next(iter(py_files.items()))
+        result = check_code(code, filename=fname, strict=False)
+        action = f"Type check: {result.get('error_count', 0)} errors"
+        return ToolExecution(tool="mypy", action=action, result=result, success=result.get("passed", True))
+    except Exception as e:
+        return ToolExecution(tool="mypy", action="Type check", success=False, error=str(e))
+
+
+def _execute_black(team: str, code_files: dict[str, str]) -> ToolExecution:
+    """Check/format Python code with Black."""
+    try:
+        from factory.tools.black_tool import check_formatting
+        py_files = {f: c for f, c in code_files.items() if f.endswith(".py")}
+        if not py_files:
+            return ToolExecution(tool="black", action="Skipped (no Python files)", success=True)
+        fname, code = next(iter(py_files.items()))
+        result = check_formatting(code, filename=fname)
+        action = f"Format check: {'clean' if result.get('passed') else 'needs formatting'}"
+        return ToolExecution(tool="black", action=action, result=result, success=result.get("passed", True))
+    except Exception as e:
+        return ToolExecution(tool="black", action="Format check", success=False, error=str(e))
+
+
+def _execute_confluence(team: str, project_id: str, title: str, content_md: str) -> ToolExecution:
+    """Publish documentation to Confluence."""
+    try:
+        from factory.tools.confluence_tool import markdown_to_storage, upsert_page
+        storage_html = markdown_to_storage(content_md)
+        page_title = f"[{project_id}] {title}" if project_id else title
+        result = upsert_page(title=page_title, body_html=storage_html)
+        action = f"{result.get('action', 'upsert')}: {page_title[:60]}"
+        return ToolExecution(tool="confluence", action=action, result=result, success=result.get("success", False))
+    except Exception as e:
+        log.debug("Confluence publish skipped for %s: %s", team, e)
+        return ToolExecution(tool="confluence", action="Publish page", success=False, error=str(e))
+
+
+def _execute_jira(team: str, project_id: str, summary: str, description: str, issue_type: str = "Story") -> ToolExecution:
+    """Create a Jira issue."""
+    try:
+        from factory.tools.jira_tool import create_issue
+        result = create_issue(summary=summary[:255], description=description[:2000], issue_type=issue_type)
+        action = f"Created {issue_type}: {result.get('key', '')} — {summary[:50]}"
+        return ToolExecution(tool="jira", action=action, result=result, success=result.get("success", False))
+    except Exception as e:
+        log.debug("Jira issue creation skipped for %s: %s", team, e)
+        return ToolExecution(tool="jira", action="Create issue", success=False, error=str(e))
+
+
+def _execute_k6(team: str, base_url: str = "", endpoints: list[str] | None = None) -> ToolExecution:
+    """Run a k6 smoke test against service endpoints."""
+    try:
+        from factory.tools.k6_tool import smoke_test
+        if not base_url:
+            return ToolExecution(tool="k6", action="Skipped (no base URL configured)", success=True)
+        result = smoke_test(base_url=base_url, endpoints=endpoints or ["/health"])
+        passed = result.get("passed", False)
+        action = f"Smoke test: {'passed' if passed else 'FAILED'} ({len(result.get('results', []))} endpoints)"
+        return ToolExecution(tool="k6", action=action, result=result, success=passed)
+    except Exception as e:
+        return ToolExecution(tool="k6", action="Smoke test", success=False, error=str(e))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -409,6 +719,27 @@ def _gen_feature_eng(requirement: str, llm_content: str) -> dict:
     }
 
 
+# Map team → default decision type (mirrors decision_log.TEAM_DECISION_TYPE)
+_DECISION_TYPES: dict[str, str] = {
+    "product_mgmt":  "feature",
+    "biz_analysis":  "acceptance_criteria",
+    "solution_arch": "ADR",
+    "api_design":    "api_contract",
+    "ux_ui":         "architecture",
+    "frontend_eng":  "architecture",
+    "backend_eng":   "architecture",
+    "database_eng":  "architecture",
+    "data_eng":      "architecture",
+    "ml_eng":        "tool_choice",
+    "security_eng":  "threat_model",
+    "compliance":    "compliance",
+    "devops":        "deployment",
+    "qa_eng":        "test_plan",
+    "sre_ops":       "deployment",
+    "docs_team":     "architecture",
+    "feature_eng":   "feature",
+}
+
 # Map team → generator function
 _GENERATORS = {
     "product_mgmt": _gen_product_mgmt,
@@ -473,6 +804,7 @@ def run_phase2_handler(
     source = "deterministic"
     cost = 0.0
     remaining = 0.0
+    a2a_dispatched: list[str] = []
     if llm_runtime is not None:
         generated = llm_runtime.generate(team=team, requirement=requirement, prior_count=prior_count, handoff_to=handoff)
         if generated is not None:
@@ -480,6 +812,17 @@ def run_phase2_handler(
             source = generated.source
             cost = generated.estimated_cost_usd
             remaining = generated.budget_remaining_usd
+            # ── A2A: dispatch any [@team: message] mentions in the LLM output ──
+            try:
+                from factory.messaging.actor import dispatch_actor_messages
+                a2a_dispatched = dispatch_actor_messages(detail, from_team=team)
+                if a2a_dispatched:
+                    log.debug(
+                        "A2A: %s dispatched %d messages: %s",
+                        team, len(a2a_dispatched), a2a_dispatched,
+                    )
+            except Exception as _a2a_exc:
+                log.debug("A2A dispatch skipped for %s: %s", team, _a2a_exc)
 
     # 3. Generate team-specific artifacts
     gen_fn = _GENERATORS.get(team)
@@ -528,6 +871,81 @@ def run_phase2_handler(
         else:
             tools_used.append(ToolExecution(tool="gcs", action=f"Skipped {len(code_files)} files (no uid/project)", success=False, error="No storage configured"))
 
+    # ── Security scanning (semgrep / trivy / ruff) ───────────────────────────
+    if tool_cfg and "semgrep" in tool_cfg.tools and code_files:
+        tools_used.append(_execute_semgrep(team, code_files))
+
+    if tool_cfg and "trivy" in tool_cfg.tools and code_files:
+        tools_used.append(_execute_trivy_iac(team, code_files))
+
+    if tool_cfg and "ruff" in tool_cfg.tools and code_files:
+        tools_used.append(_execute_ruff(team, code_files))
+
+    # ── Black formatting check ────────────────────────────────────────────────
+    if tool_cfg and "black" in tool_cfg.tools and code_files:
+        tools_used.append(_execute_black(team, code_files))
+
+    # ── mypy type check ───────────────────────────────────────────────────────
+    if tool_cfg and "mypy" in tool_cfg.tools and code_files:
+        tools_used.append(_execute_mypy(team, code_files))
+
+    # ── Bandit SAST ───────────────────────────────────────────────────────────
+    if tool_cfg and "bandit" in tool_cfg.tools and code_files:
+        tools_used.append(_execute_bandit(team, code_files))
+
+    # ── Gitleaks secret scan ──────────────────────────────────────────────────
+    if tool_cfg and "gitleaks" in tool_cfg.tools and code_files:
+        tools_used.append(_execute_gitleaks(team, code_files))
+
+    # ── Checkov IaC scan ─────────────────────────────────────────────────────
+    if tool_cfg and "checkov" in tool_cfg.tools and code_files:
+        tools_used.append(_execute_checkov(team, code_files))
+
+    # ── Plane issue tracking (all teams with Plane configured) ──────────────
+    if tool_cfg and "plane" in tool_cfg.tools and project_id:
+        decision_type_for_plane = _DECISION_TYPES.get(team, "architecture")
+        issue_title = (
+            gen_data.get("plane_issue_title")
+            or gen_data.get("doc_title")
+            or gen_data.get("sheet_title")
+            or f"[{team}] {decision_type_for_plane}: {requirement[:60]}"
+        )
+        tools_used.append(
+            _execute_plane(team, project_id, requirement, issue_title, decision_type_for_plane, detail[:300])
+        )
+
+    # ── Stage-complete notification (every team) ─────────────────────────────
+    if tool_cfg and "notification" in tool_cfg.tools:
+        tools_used.append(
+            _execute_notification(team, project_id or "pipeline", requirement, detail[:200])
+        )
+
+    # ── Slack rich notification (teams with slack configured) ────────────────
+    if tool_cfg and "slack" in tool_cfg.tools:
+        doc_title = gen_data.get("doc_title") or gen_data.get("sheet_title") or f"{team} artifact"
+        tools_used.append(_execute_slack(team, project_id or "pipeline", doc_title, handoff))
+
+    # ── Confluence wiki publish (docs_team, solution_arch, compliance, biz_analysis) ───
+    if tool_cfg and "confluence" in tool_cfg.tools and gen_data.get("doc_content"):
+        tools_used.append(_execute_confluence(
+            team, project_id,
+            gen_data.get("doc_title", f"{team} documentation"),
+            gen_data["doc_content"],
+        ))
+
+    # ── Jira issue creation (product_mgmt, feature_eng, biz_analysis) ────────
+    if tool_cfg and "jira" in tool_cfg.tools and project_id:
+        jira_title = (
+            gen_data.get("plane_issue_title")
+            or gen_data.get("doc_title")
+            or f"[{team}] {requirement[:80]}"
+        )
+        tools_used.append(_execute_jira(
+            team, project_id,
+            summary=jira_title,
+            description=detail[:1000],
+        ))
+
     # 5. Build artifact text
     tools_summary = "; ".join(
         f"{t.tool}({'✓' if t.success else '✗'}: {t.action})" for t in tools_used
@@ -543,8 +961,19 @@ def run_phase2_handler(
         f"- budget_remaining_usd: {remaining:.6f}\n"
         f"- tools_used: {tools_summary}\n"
         f"- artifacts_produced: {', '.join(tool_cfg.artifacts) if tool_cfg else 'none'}\n"
+        f"- a2a_messages_sent: {len(a2a_dispatched)}\n"
         f"- handoff_to: {handoff}"
     )
+
+    # ── Decision metadata ──────────────────────────────────────────────────
+    decision_type = _DECISION_TYPES.get(team, "architecture")
+    decision_title = (
+        gen_data.get("doc_title")
+        or gen_data.get("sheet_title")
+        or f"{team.replace('_', ' ').title()} — {requirement[:60]}"
+    )
+    # Use the LLM-generated detail as rationale (first 500 chars); fall back to action line
+    decision_rationale = (detail or "").strip()[:500] or f"Phase 2 artifact for {team}"
 
     return Phase2StageArtifact(
         team=team,
@@ -553,4 +982,7 @@ def run_phase2_handler(
         code_files=code_files,
         qa_issues=gen_data.get("qa_issues", []),
         qa_verdict=gen_data.get("qa_verdict", ""),
+        decision_type=decision_type,
+        decision_title=decision_title,
+        decision_rationale=decision_rationale,
     )

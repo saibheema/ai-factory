@@ -1,8 +1,11 @@
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -276,9 +279,15 @@ class TeamLLMRuntime:
             "max_tokens": 2000,
         }
 
+        content: str | None = None
+        source = f"litellm-proxy:{model}"
+
+        # ── Tier 1: LiteLLM proxy ────────────────────────────────────────────
         try:
             with httpx.Client(timeout=30.0) as client:
-                response = client.post(f"{self.proxy_url}/chat/completions", json=payload)
+                response = client.post(
+                    f"{self.proxy_url}/chat/completions", json=payload
+                )
                 response.raise_for_status()
                 data = response.json()
             content = (
@@ -286,16 +295,58 @@ class TeamLLMRuntime:
                 .get("message", {})
                 .get("content", "")
                 .strip()
-            )
-            if not content:
-                return None
-        except Exception:
+            ) or None
+        except Exception as _e1:
+            log.debug("Proxy call failed for team=%s, trying SDK: %s", team, _e1)
+
+        # ── Tier 2: LiteLLM SDK direct (bypasses proxy, uses provider directly) ──
+        if content is None:
+            try:
+                import litellm  # type: ignore[import]
+                extra: dict = {}
+                if team in self._api_key_by_team:
+                    extra["api_key"] = self._api_key_by_team[team]
+                sdk_resp = litellm.completion(
+                    model=model,
+                    messages=payload["messages"],
+                    temperature=0.3,
+                    max_tokens=2000,
+                    **extra,
+                )
+                content = (sdk_resp.choices[0].message.content or "").strip() or None
+                source = f"litellm-sdk:{model}"
+            except Exception as _e2:
+                log.debug("LiteLLM SDK failed for team=%s, trying Ollama: %s", team, _e2)
+
+        # ── Tier 3: Ollama local model ────────────────────────────────────────
+        if content is None:
+            try:
+                ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
+                ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2")
+                with httpx.Client(timeout=60.0) as client:
+                    response = client.post(
+                        f"{ollama_url}/api/chat",
+                        json={
+                            "model": ollama_model,
+                            "messages": payload["messages"],
+                            "stream": False,
+                            "options": {"temperature": 0.3, "num_predict": 2000},
+                        },
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                content = (data.get("message", {}).get("content", "") or "").strip() or None
+                source = f"ollama:{ollama_model}"
+            except Exception as _e3:
+                log.debug("Ollama fallback failed for team=%s: %s", team, _e3)
+
+        if not content:
             return None
 
         self._spent_by_team[team] = self.spent(team) + estimate
         return LLMGeneration(
             content=content,
-            source=f"litellm:{model}",
+            source=source,
             estimated_cost_usd=estimate,
             budget_remaining_usd=self.remaining(team),
         )

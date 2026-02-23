@@ -30,12 +30,18 @@ services:
       dockerfile: services/orchestrator/Dockerfile
     env_file:
       - .env.example
+    environment:
+      - HITL_SERVICE_URL=http://hitl:8007
+      - GROUPCHAT_SERVICE_URL=http://groupchat:8002
+      - MEMORY_SVC_URL=http://memory_svc:8008
+      - OLLAMA_URL=http://ollama:11434
     ports:
       - "8000:8000"
     depends_on:
       - redis
       - postgres
       - memory
+      - hitl
 
   chat:
     build:
@@ -52,15 +58,47 @@ services:
     build:
       context: .
       dockerfile: services/groupchat/Dockerfile
+    env_file:
+      - .env.example
+    environment:
+      - ENABLE_LLM_RUNTIME=true
+      - OLLAMA_URL=http://ollama:11434
     ports:
       - "8002:8002"
+    depends_on:
+      - ollama
+
+  hitl:
+    build:
+      context: .
+      dockerfile: services/hitl_svc/Dockerfile
+    env_file:
+      - .env.example
+    ports:
+      - "8007:8007"
+
+  memory_svc:
+    build:
+      context: .
+      dockerfile: services/memory_svc/Dockerfile
+    env_file:
+      - .env.example
+    ports:
+      - "8008:8008"
 
   memory:
     build:
       context: .
       dockerfile: services/memory/Dockerfile
+    environment:
+      - DB_HOST=postgres
+      - DB_NAME=factory
+      - DB_USER=factory_user
+      - DB_PASSWORD=CHANGEME
     ports:
       - "8006:8006"
+    depends_on:
+      - postgres
 
   frontend:
     build:
@@ -80,6 +118,59 @@ services:
     depends_on:
       - redis
 
+  # ── Connection pooling ──────────────────────────────────────────────────────
+  pgbouncer:
+    image: bitnami/pgbouncer:latest
+    environment:
+      PGBOUNCER_DATABASE: factory
+      POSTGRESQL_HOST: postgres
+      POSTGRESQL_PORT: 5432
+      POSTGRESQL_USERNAME: factory_user
+      POSTGRESQL_PASSWORD: CHANGEME
+      PGBOUNCER_POOL_MODE: transaction
+      PGBOUNCER_MAX_CLIENT_CONN: 200
+      PGBOUNCER_DEFAULT_POOL_SIZE: 20
+      PGBOUNCER_AUTH_TYPE: scram-sha-256
+    ports:
+      - "5433:5432"
+    depends_on:
+      - postgres
+
+  # ── Log aggregation (Loki + promtail) ───────────────────────────────────────
+  loki:
+    image: grafana/loki:2.9.4
+    command: -config.file=/etc/loki/loki-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./observability/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki_data:/loki
+
+  promtail:
+    image: grafana/promtail:2.9.4
+    command: -config.file=/etc/promtail/promtail-config.yaml
+    volumes:
+      - ./observability/loki/promtail-config.yaml:/etc/promtail/promtail-config.yaml:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      - loki
+
+  # ── OpenTelemetry Collector ─────────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    command: ["--config=/etc/otel/otel-collector.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Prometheus metrics (self)
+      - "8889:8889"   # Prometheus exporter for pipeline traces
+    volumes:
+      - ./observability/otel/otel-collector.yaml:/etc/otel/otel-collector.yaml:ro
+    depends_on:
+      - loki
+
 volumes:
   pg_data:
   ollama_data:
+  loki_data:

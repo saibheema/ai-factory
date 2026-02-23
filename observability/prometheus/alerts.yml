@@ -1,20 +1,256 @@
 groups:
-  - name: ai-factory-slo
+  # ─── Pipeline Health ───────────────────────────────────────────────────────
+  - name: ai-factory-pipeline
     rules:
       - alert: AIFactoryFullPipelineHandoffFailures
         expr: increase(ai_factory_full_pipeline_handoff_fail_total[5m]) > 0
         for: 2m
         labels:
           severity: warning
+          team: platform
         annotations:
-          summary: Full pipeline handoff failures detected
-          description: One or more full pipeline runs reported broken handoff chain in the last 5 minutes.
+          summary: "Full pipeline handoff failures detected"
+          description: "One or more full pipeline runs reported broken handoff chain in the last 5 minutes."
 
       - alert: AIFactoryCorePipelineNoTraffic
         expr: increase(ai_factory_core_pipeline_runs_total[30m]) == 0
         for: 30m
         labels:
           severity: info
+          team: platform
         annotations:
-          summary: No core pipeline traffic
-          description: No core pipeline runs observed in the last 30 minutes.
+          summary: "No core pipeline traffic"
+          description: "No core pipeline runs observed in the last 30 minutes."
+
+      - alert: AIFactoryPipelineHighErrorRate
+        expr: >
+          rate(ai_factory_pipeline_errors_total[5m])
+          / rate(ai_factory_pipeline_runs_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Pipeline error rate > 10%"
+          description: "{{ $value | humanizePercentage }} of pipeline runs are failing."
+
+      - alert: AIFactoryStageLatencyHigh
+        expr: histogram_quantile(0.95, rate(ai_factory_stage_duration_seconds_bucket[5m])) > 30
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "P95 stage latency > 30s"
+          description: "Team {{ $labels.team }} p95 stage duration is {{ $value | humanizeDuration }}."
+
+  # ─── HITL Service ──────────────────────────────────────────────────────────
+  - name: ai-factory-hitl
+    rules:
+      - alert: HITLQueueDepthHigh
+        expr: ai_factory_hitl_pending_reviews_total > 10
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "HITL review queue backlog > 10"
+          description: "{{ $value }} reviews are pending human approval for more than 10 minutes."
+
+      - alert: HITLQueueStalled
+        expr: increase(ai_factory_hitl_reviews_resolved_total[60m]) == 0
+          and ai_factory_hitl_pending_reviews_total > 0
+        for: 60m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "HITL queue stalled — no resolutions in 1 hour"
+          description: "{{ $value }} reviews remain unprocessed. Human attention required."
+
+      - alert: HITLServiceDown
+        expr: up{job="hitl"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "HITL service is down"
+          description: "The HITL approval service has been unreachable for 2 minutes."
+
+  # ─── LLM & Cost ────────────────────────────────────────────────────────────
+  - name: ai-factory-llm
+    rules:
+      - alert: LLMBudgetNearlyExhausted
+        expr: ai_factory_llm_budget_remaining_usd < 5
+        for: 1m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "LLM budget < $5 remaining"
+          description: "Only ${{ $value }} of LLM budget remains. Consider topping up."
+
+      - alert: LLMBudgetExhausted
+        expr: ai_factory_llm_budget_remaining_usd <= 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "LLM budget exhausted"
+          description: "LLM budget is ${{ $value }}. Pipeline will fall back to deterministic mode."
+
+      - alert: LLMFallbackRateHigh
+        expr: >
+          rate(ai_factory_llm_fallback_total[10m])
+          / rate(ai_factory_llm_calls_total[10m]) > 0.3
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "LLM fallback rate > 30%"
+          description: "{{ $value | humanizePercentage }} of LLM calls are falling back to deterministic output."
+
+      - alert: LLMProxyDown
+        expr: up{job="orchestrator"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Orchestrator/LLM proxy is unreachable"
+          description: "The orchestrator service (LLM proxy) has been down for 2 minutes."
+
+  # ─── Memory Service ─────────────────────────────────────────────────────────
+  - name: ai-factory-memory
+    rules:
+      - alert: MemoryServiceDown
+        expr: up{job="memory"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "pgvector memory service is down"
+          description: "The semantic memory service (pgvector) has been unreachable for 2 minutes."
+
+      - alert: MemorySvcDown
+        expr: up{job="memory_svc"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Memory SVC is down"
+          description: "The Firestore-backed memory_svc has been unreachable for 2 minutes."
+
+      - alert: MemoryCompressionBacklogHigh
+        expr: ai_factory_memory_items_pending_compression > 500
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Memory compression backlog > 500 items"
+          description: "{{ $value }} memory items are pending compression for more than 15 minutes."
+
+  # ─── External Tool APIs ─────────────────────────────────────────────────────
+  - name: ai-factory-tools
+    rules:
+      - alert: PlaneAPIErrorRate
+        expr: rate(ai_factory_tool_errors_total{tool="plane"}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Plane (issue tracker) API error rate elevated"
+          description: "{{ $value }} Plane API errors/sec — issue tracking may be degraded."
+
+      - alert: SemgrepScanFailRate
+        expr: rate(ai_factory_tool_errors_total{tool="semgrep"}[10m]) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "Semgrep SAST scan failure rate elevated"
+          description: "{{ $value }} Semgrep errors/sec — SAST coverage may be incomplete."
+
+      - alert: TrivyScanFailRate
+        expr: rate(ai_factory_tool_errors_total{tool="trivy"}[10m]) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "Trivy IaC/CVE scan failure rate elevated"
+          description: "{{ $value }} Trivy errors/sec — vulnerability scan coverage may be incomplete."
+
+      - alert: NotificationDeliveryFailures
+        expr: increase(ai_factory_tool_errors_total{tool="notification"}[15m]) > 5
+        for: 5m
+        labels:
+          severity: info
+          team: platform
+        annotations:
+          summary: "Stage-complete notifications failing"
+          description: "{{ $value }} notification delivery failures in the last 15 minutes."
+
+  # ─── Groupchat Service ───────────────────────────────────────────────────────
+  - name: ai-factory-groupchat
+    rules:
+      - alert: GroupchatServiceDown
+        expr: up{job="groupchat"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Groupchat service is down"
+          description: "The multi-agent groupchat service has been unreachable for 2 minutes."
+
+      - alert: GroupchatRoundLatencyHigh
+        expr: histogram_quantile(0.95, rate(ai_factory_groupchat_round_duration_seconds_bucket[5m])) > 120
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Groupchat P95 round duration > 2 min"
+          description: "Group discussion rounds are taking longer than expected: {{ $value | humanizeDuration }}."
+
+  # ─── Infrastructure ─────────────────────────────────────────────────────────
+  - name: ai-factory-infra
+    rules:
+      - alert: PostgresDown
+        expr: up{job="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "PostgreSQL is unreachable"
+          description: "The primary postgres instance has been down for 1 minute."
+
+      - alert: PgBouncerDown
+        expr: up{job="pgbouncer"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "PgBouncer connection pool is down"
+          description: "PgBouncer has been unreachable for 2 minutes — database connections may be saturated."
+
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Redis is down"
+          description: "Redis (session/queue store) has been unreachable for 2 minutes."

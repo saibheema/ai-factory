@@ -184,3 +184,49 @@ class FirestoreStore:
     def get_git_token(self, uid: str, project_id: str = "") -> str:  # project_id kept for compat
         """Always return the user-level token."""
         return self.get_user_git_token(uid)
+
+    # ── Decision Log ─────────────────────────────────────────────────────
+    def save_decision(self, uid: str, project_id: str, entry: object) -> None:
+        """Persist a DecisionEntry under users/{uid}/projects/{id}/decisions/{id}."""
+        ref = (
+            self._project_ref(uid, project_id)
+            .collection("decisions")
+            .document(entry.id)
+        )
+        ref.set(
+            {
+                "id": entry.id,
+                "ts": entry.ts,
+                "project_id": entry.project_id,
+                "team": entry.team,
+                "decision_type": entry.decision_type,
+                "title": entry.title,
+                "rationale": entry.rationale,
+                "artifact_ref": entry.artifact_ref,
+            }
+        )
+
+    def list_decisions(
+        self,
+        uid: str,
+        project_id: str,
+        team: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Return decision entries (newest-first), optionally filtered by team.
+
+        Filtering is done in Python to avoid Firestore composite-index requirements.
+        """
+        ref = self._project_ref(uid, project_id).collection("decisions")
+        docs = ref.limit(max(limit * 3, 200)).stream()
+        results: list[dict] = []
+        for d in docs:
+            if d.exists:
+                data = d.to_dict()
+                if team is None or data.get("team") == team:
+                    results.append(data)
+                    if len(results) >= limit:
+                        break
+        # Sort newest-first by timestamp string (ISO 8601 sorts lexicographically)
+        results.sort(key=lambda x: x.get("ts", ""), reverse=True)
+        return results

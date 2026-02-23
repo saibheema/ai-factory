@@ -858,6 +858,11 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   const [bankDetail, setBankDetail] = useState(null)
   const [bankLoading, setBankLoading] = useState(false)
 
+  /* Memory node decisions */
+  const [nodeDecisions, setNodeDecisions] = useState(null)
+  const [decisionsLoading, setDecisionsLoading] = useState(false)
+  const [memoryDetailTab, setMemoryDetailTab] = useState('memory') // 'memory' | 'decisions'
+
   const messagesEndRef = useRef(null)
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [chatHistory, pipelineHistory, groupHistory, taskStatus])
 
@@ -1125,6 +1130,19 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
       setBankDetail(data)
     } catch (e) { setError(e.message) }
     finally { setBankLoading(false) }
+  }
+
+  /* ─── Team Decision Log ─── */
+  async function loadNodeDecisions(team) {
+    setDecisionsLoading(true)
+    try {
+      const data = await api(`/api/projects/${projectId}/decisions?team=${encodeURIComponent(team)}`)
+      setNodeDecisions(data?.decisions || [])
+    } catch (e) {
+      setNodeDecisions([])
+    } finally {
+      setDecisionsLoading(false)
+    }
   }
 
   /* ─── Chat ─── */
@@ -1403,27 +1421,94 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                 <div><h3>Knowledge Graph</h3><p>Artifacts and team outputs for <strong>{projectId}</strong>.</p></div>
                 <button className="primaryBtn" onClick={loadMemoryMap} disabled={loading}>{loading ? <Loader2 size={16} className="spin" /> : 'Refresh'}</button>
               </div>
-              <MemoryGraph data={memoryMap} onNodeClick={node => { setSelectedMemoryNode(node); loadBankDetail(node.id) }} />
+              <MemoryGraph data={memoryMap} onNodeClick={node => {
+                setSelectedMemoryNode(node)
+                setBankDetail(null)
+                setNodeDecisions(null)
+                setMemoryDetailTab('memory')
+                loadBankDetail(node.id)
+                loadNodeDecisions(node.team)
+              }} />
               {selectedMemoryNode && (
                 <div className="nodeDetail">
                   <div className="nodeDetailHeader">
                     <h4>{selectedMemoryNode.displayName || formatTeamName(selectedMemoryNode.team)}</h4>
-                    <button className="iconBtn" onClick={() => { setSelectedMemoryNode(null); setBankDetail(null) }}><XCircle size={16} /></button>
+                    <button className="iconBtn" onClick={() => { setSelectedMemoryNode(null); setBankDetail(null); setNodeDecisions(null) }}><XCircle size={16} /></button>
                   </div>
-                  <p>Bank: <code>{selectedMemoryNode.id}</code> · Artifacts: <strong>{selectedMemoryNode.items}</strong></p>
-                  {bankLoading && <div style={{ padding: '12px', textAlign: 'center' }}><Loader2 size={16} className="spin" /></div>}
-                  {bankDetail && !bankLoading && (
-                    <div className="bankDetailList">
-                      {bankDetail.items.map((item, i) => (
-                        <div key={i} className={`bankDetailItem bankDetail-${item.type}`}>
-                          <div className="bankDetailType">
-                            {item.type === 'knowledge' ? <BookOpen size={12} /> : item.type === 'file_index' ? <FileText size={12} /> : item.type === 'artifact' ? <Hash size={12} /> : <MessageCircle size={12} />}
-                            <span>{item.type.replace('_', ' ')}</span>
+                  <p className="nodeDetailMeta">Bank: <code>{selectedMemoryNode.id}</code> · Artifacts: <strong>{selectedMemoryNode.items}</strong></p>
+
+                  {/* Tab switcher */}
+                  <div className="nodeDetailTabs">
+                    <button
+                      className={`nodeDetailTab ${memoryDetailTab === 'memory' ? 'active' : ''}`}
+                      onClick={() => setMemoryDetailTab('memory')}
+                    >
+                      <Database size={12} /> Memory Items
+                    </button>
+                    <button
+                      className={`nodeDetailTab ${memoryDetailTab === 'decisions' ? 'active' : ''}`}
+                      onClick={() => setMemoryDetailTab('decisions')}
+                    >
+                      <BookOpen size={12} /> Decisions
+                      {nodeDecisions && nodeDecisions.length > 0 && (
+                        <span className="nodeDetailTabBadge">{nodeDecisions.length}</span>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* ── Memory tab ── */}
+                  {memoryDetailTab === 'memory' && (
+                    <>
+                      {bankLoading && <div style={{ padding: '12px', textAlign: 'center' }}><Loader2 size={16} className="spin" /></div>}
+                      {bankDetail && !bankLoading && (
+                        <div className="bankDetailList">
+                          {bankDetail.items.map((item, i) => (
+                            <div key={i} className={`bankDetailItem bankDetail-${item.type}`}>
+                              <div className="bankDetailType">
+                                {item.type === 'knowledge' ? <BookOpen size={12} /> : item.type === 'file_index' ? <FileText size={12} /> : item.type === 'artifact' ? <Hash size={12} /> : item.type === 'decision' ? <ArrowDownToLine size={12} /> : <MessageCircle size={12} />}
+                                <span>{item.type.replace('_', ' ')}</span>
+                                {item.decision_type && <span className={`decisionTypePill decType-${item.decision_type}`}>{item.decision_type.replace('_', ' ')}</span>}
+                              </div>
+                              <div className="bankDetailContent">{item.content.substring(0, 400)}{item.content.length > 400 ? '...' : ''}</div>
+                            </div>
+                          ))}
+                          {bankDetail.items.length === 0 && <p style={{ color: 'var(--text3)', fontSize: '13px', padding: '8px 0' }}>No items yet for this team.</p>}
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {/* ── Decisions tab ── */}
+                  {memoryDetailTab === 'decisions' && (
+                    <div className="decisionsPanel">
+                      {decisionsLoading && <div style={{ padding: '12px', textAlign: 'center' }}><Loader2 size={16} className="spin" /></div>}
+                      {!decisionsLoading && nodeDecisions && nodeDecisions.length === 0 && (
+                        <div className="decisionsEmpty">
+                          <BookOpen size={28} style={{ color: '#cbd5e1', marginBottom: 8 }} />
+                          <p>No decisions logged yet for <strong>{formatTeamName(selectedMemoryNode.team)}</strong>.</p>
+                          <span>Decisions are recorded when a pipeline run completes.</span>
+                        </div>
+                      )}
+                      {!decisionsLoading && nodeDecisions && nodeDecisions.map(d => (
+                        <div key={d.id} className="decisionCard">
+                          <div className="decisionCardHeader">
+                            <span className={`decisionTypeBadge decType-${d.decision_type}`}>
+                              {d.decision_type?.replace(/_/g, ' ').toUpperCase() || 'DECISION'}
+                            </span>
+                            <span className="decisionTs">
+                              <Clock size={11} />
+                              {new Date(d.ts).toLocaleString()}
+                            </span>
                           </div>
-                          <div className="bankDetailContent">{item.content.substring(0, 400)}{item.content.length > 400 ? '...' : ''}</div>
+                          <div className="decisionTitle">{d.title}</div>
+                          {d.rationale && (
+                            <div className="decisionRationale">{d.rationale.substring(0, 400)}{d.rationale.length > 400 ? '…' : ''}</div>
+                          )}
+                          {d.artifact_ref && d.artifact_ref !== `memory://team-${d.team}` && (
+                            <div className="decisionRef"><Hash size={11} /> {d.artifact_ref}</div>
+                          )}
                         </div>
                       ))}
-                      {bankDetail.items.length === 0 && <p style={{ color: 'var(--text3)', fontSize: '13px', padding: '8px 0' }}>No items yet for this team.</p>}
                     </div>
                   )}
                 </div>

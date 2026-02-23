@@ -13,6 +13,8 @@ Changes from v0.2:
 
 import logging
 import os
+import asyncio
+import json
 import threading
 import uuid
 from collections import defaultdict, deque
@@ -23,13 +25,14 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.requests import Request as StarletteRequest
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from factory.auth.firebase_auth import AuthUser, get_current_user
 from factory.clarification.broker import ClarificationBroker
 from factory.agents.phase2_handlers import extract_handoff_to, run_phase2_handler
 from factory.agents.task_result import TaskResult
 from factory.llm.runtime import TeamLLMRuntime
+from factory.memory.decision_log import DecisionLog, TEAM_DECISION_TYPE
 from factory.pipeline.phase1_pipeline import Phase1Context, Phase1Pipeline
 from factory.pipeline.phase2_pipeline import Phase2Context, Phase2Pipeline
 from factory.pipeline.project_qa import answer_project_question
@@ -88,6 +91,7 @@ tracer = LangfuseTracer()
 metrics = MetricsRegistry()
 incident_notifier = IncidentNotifier()
 groupchat_service_url = os.getenv("GROUPCHAT_SERVICE_URL", "http://groupchat:8002")
+hitl_service_url = os.getenv("HITL_SERVICE_URL", "http://hitl:8007")
 
 # Teams list for knowledge sharing
 ALL_TEAMS = list(phase2_pipeline.teams)
@@ -403,6 +407,12 @@ def _run_full_pipeline_tracked(
     qa_verdict: str = "N/A"
     qa_issues: list[str] = []
 
+    # Decision log for this run
+    try:
+        _dec_log: DecisionLog | None = DecisionLog(store=_get_firestore())
+    except Exception:
+        _dec_log = None
+
     # ── Pre-populate all_code_files with existing code so new output EXTENDS it ──
     prior_code: dict[str, dict[str, str]] = {}
     if req.existing_code and req.is_followup:
@@ -493,6 +503,21 @@ def _run_full_pipeline_tracked(
             if team == "qa_eng" and stage.qa_verdict:
                 qa_verdict = stage.qa_verdict
                 qa_issues = list(stage.qa_issues)
+
+            # ── Log team decision to Firestore ──────────────────────────────
+            if _dec_log is not None:
+                try:
+                    _dec_log.record(
+                        uid=uid,
+                        project_id=req.project_id,
+                        team=team,
+                        decision_type=stage.decision_type,
+                        title=stage.decision_title,
+                        rationale=stage.decision_rationale,
+                        artifact_ref=f"memory://team-{team}",
+                    )
+                except Exception as _dec_exc:
+                    log.warning("Decision log failed for %s: %s", team, _dec_exc)
 
             summary = (
                 f"phase2-stage={team} prior={len(prior)} "
@@ -968,6 +993,57 @@ def get_task_status(
     return task
 
 
+@app.get("/api/tasks/{task_id}/stream")
+async def stream_task_status(
+    task_id: str, user: AuthUser = Depends(get_current_user)
+) -> StreamingResponse:
+    """SSE endpoint — pushes task state updates as server-sent events.
+
+    The client receives a ``data: <json>`` line each time the task status or
+    active team changes, followed by a ``event: done`` when the task finishes.
+    """
+    async def _event_generator():
+        last_status: str | None = None
+        last_team: str | None = None
+        # Max 5 minutes at 0.5 s polling = 600 iterations
+        for _ in range(600):
+            task = _task_store_load(task_id)
+            if task is None:
+                yield f"event: error\ndata: {json.dumps({'detail': 'task not found'})}\n\n"
+                return
+
+            current_status = task.get("status")
+            current_team = task.get("current_team")
+
+            # Emit on first call or whenever something changes
+            if current_status != last_status or current_team != last_team:
+                yield f"data: {json.dumps(task)}\n\n"
+                last_status = current_status
+                last_team = current_team
+
+            if current_status in ("completed", "failed"):
+                yield (
+                    f"event: done\n"
+                    f"data: {json.dumps({'task_id': task_id, 'status': current_status})}\n\n"
+                )
+                return
+
+            await asyncio.sleep(0.5)
+
+        # Timeout — tell client to fall back to polling
+        yield f"event: timeout\ndata: {json.dumps({'task_id': task_id})}\n\n"
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 # ═══════════════════════════════════════════════════════════
 #  PROJECT Q&A, CHAT, GROUP CHAT (user-scoped memory)
 # ═══════════════════════════════════════════════════════════
@@ -1059,8 +1135,101 @@ def get_clarification(
 
 
 # ═══════════════════════════════════════════════════════════
-#  GOVERNANCE (user-scoped settings)
+#  HITL (Human-in-the-Loop) — proxy to hitl_svc
 # ═══════════════════════════════════════════════════════════
+
+class HITLSubmitRequest(BaseModel):
+    team: str = Field(min_length=2)
+    question: str = Field(min_length=5)
+    context: str = ""
+    urgency: str = "normal"
+    options: list[str] = Field(default_factory=list)
+
+
+class HITLRespondRequest(BaseModel):
+    decision: str = Field(min_length=1)
+    comment: str = ""
+
+
+@app.post("/api/projects/{project_id}/hitl/requests", status_code=201)
+def submit_hitl_request(
+    project_id: str,
+    body: HITLSubmitRequest,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Submit a new HITL escalation request to the HITL service."""
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.post(
+                f"{hitl_service_url}/hitl/requests",
+                json={
+                    "project_id": project_id,
+                    "task_id": None,
+                    "team": body.team,
+                    "question": body.question,
+                    "context": body.context,
+                    "urgency": body.urgency,
+                    "options": body.options,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"HITL service unavailable: {exc}")
+
+
+@app.get("/api/projects/{project_id}/hitl/pending")
+def get_hitl_pending(
+    project_id: str,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Return pending HITL escalation requests for a project."""
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.get(
+                f"{hitl_service_url}/hitl/pending",
+                params={"project_id": project_id},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"HITL service unavailable: {exc}")
+
+
+@app.post("/api/hitl/requests/{request_id}/respond")
+def respond_hitl_request(
+    request_id: str,
+    body: HITLRespondRequest,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Human operator submits a decision for a pending HITL request."""
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.post(
+                f"{hitl_service_url}/hitl/requests/{request_id}/respond",
+                json={"decision": body.decision, "comment": body.comment},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"HITL service unavailable: {exc}")
+
+
+@app.get("/api/hitl/requests/{request_id}")
+def get_hitl_request(
+    request_id: str,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Poll the status of a HITL escalation request."""
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.get(f"{hitl_service_url}/hitl/requests/{request_id}")
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"HITL service unavailable: {exc}")
+
+
 @app.get("/api/governance/budgets")
 def get_budget_governance(
     user: AuthUser = Depends(get_current_user),
@@ -1160,6 +1329,37 @@ def project_memory_map(
             "banks": len(nodes),
             "items": sum(team_to_items.values()),
         },
+    }
+
+
+# ═══════════════════════════════════════════════════════════
+#  DECISIONS — team decision log (ADRs, acceptance criteria, etc.)
+# ═══════════════════════════════════════════════════════════
+@app.get("/api/projects/{project_id}/decisions")
+def get_project_decisions(
+    project_id: str,
+    team: str | None = None,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Return decision entries for a project, optionally filtered by ?team=<name>.
+
+    Used by the frontend Memory Map to show structured decisions on node click.
+    """
+    try:
+        decisions = DecisionLog(store=_get_firestore()).list(
+            uid=user.uid,
+            project_id=project_id,
+            team=team,
+            limit=100,
+        )
+    except Exception as exc:
+        log.warning("Failed to load decisions for %s: %s", project_id, exc)
+        decisions = []
+    return {
+        "project_id": project_id,
+        "team": team,
+        "total": len(decisions),
+        "decisions": decisions,
     }
 
 
@@ -1486,6 +1686,14 @@ def get_memory_bank_detail(
             entries.append({"type": "chat_user", "content": rest[len("user:"):]})
         elif rest.startswith("assistant:"):
             entries.append({"type": "chat_assistant", "content": rest[len("assistant:"):]})
+        elif rest.startswith("decision:"):
+            # decision:<type>:<title>
+            dec_parts = rest[len("decision:"):].split(":", 1)
+            entries.append({
+                "type": "decision",
+                "decision_type": dec_parts[0] if dec_parts else "",
+                "content": dec_parts[1] if len(dec_parts) > 1 else rest,
+            })
         else:
             entries.append({"type": "artifact", "content": rest})
     return {
@@ -1744,3 +1952,52 @@ def trigger_selfheal_manual(
         "errors_analyzed": len(errors),
         "analysis": analysis,
     }
+
+
+# ═══════════════════════════════════════════════════════════
+#  A2A MESSAGE BUS — inspect inter-team messages
+# ═══════════════════════════════════════════════════════════
+
+@app.get("/api/a2a/messages")
+def get_a2a_messages(
+    team: str | None = None,
+    limit: int = 50,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Return recent A2A messages from the in-process bus (for observability)."""
+    try:
+        from factory.messaging.bus import get_bus
+        bus = get_bus()
+        messages = bus.message_log(team=team, limit=limit)
+        stats = bus.team_stats()
+        return {
+            "messages": messages,
+            "team_stats": stats,
+            "filter_team": team,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"A2A bus unavailable: {exc}")
+
+
+@app.get("/api/a2a/teams/{team}/inbox")
+def get_team_inbox(
+    team: str,
+    peek: bool = True,    # if True, don't consume messages
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Return queued messages for a team (peek mode by default)."""
+    try:
+        from factory.messaging.bus import get_bus
+        bus = get_bus()
+        if peek:
+            msgs = [m.to_dict() for m in bus.peek(team)]
+        else:
+            msgs = [m.to_dict() for m in bus.receive_all(team)]
+        return {
+            "team": team,
+            "mode": "peek" if peek else "drain",
+            "count": len(msgs),
+            "messages": msgs,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"A2A bus unavailable: {exc}")
