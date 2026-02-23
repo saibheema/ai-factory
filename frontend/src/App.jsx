@@ -301,23 +301,35 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
     return '#9dacbb'
   }
 
-  // Pick first file by default
+  // Pick first file by default; auto-switch to code tab if no renderable frontend
   useEffect(() => {
-    if (allFiles.length > 0 && !selectedFile) setSelectedFile(allFiles[0].key)
+    if (allFiles.length > 0) {
+      if (!selectedFile) setSelectedFile(allFiles[0].key)
+      if (!hasFrontend && viewMode === 'preview') setViewMode('code')
+    }
   }, [taskStatus]) // eslint-disable-line
 
   const currentFile = allFiles.find(f => f.key === selectedFile)
 
-  // ── Build runnable preview document from frontend_eng code ──
+  // ── Build runnable preview document from any jsx/js files ──
   const buildRunnable = () => {
-    // Try unified code first, then fall back to per-team
-    const feFilesLegacy = codeFiles.frontend_eng || {}
-    const appJsxUnified = unifiedCode?.['src/App.jsx'] || unifiedCode?.['src/app.jsx'] || unifiedCode?.['App.jsx'] || ''
-    const appJsx = appJsxUnified || feFilesLegacy['src/App.jsx'] || feFilesLegacy['src/app.jsx'] || feFilesLegacy['App.jsx'] || ''
-    const feFiles = unifiedCode
-      ? Object.fromEntries(Object.entries(unifiedCode).filter(([k]) => k.endsWith('.jsx') || k.endsWith('.js') || k.endsWith('.tsx')))
-      : feFilesLegacy
-    const allJsx = Object.values(feFiles).filter(c => c && (c.includes('function ') || c.includes('=>') || c.includes('const '))).join('\n\n')
+    // Collect all jsx/tsx/js files from unified or per-team
+    const jsxMap = {}
+    allFiles.forEach(f => {
+      if (f.fname.endsWith('.jsx') || f.fname.endsWith('.tsx') || f.fname.endsWith('.js')) {
+        jsxMap[f.fname] = f.content
+      }
+    })
+    // Find best entry file: prefer App.jsx > index.jsx > first file with a component
+    const entryOrder = ['src/App.jsx','App.jsx','src/app.jsx','src/index.jsx','index.jsx','src/main.jsx','main.jsx']
+    let appJsx = ''
+    for (const name of entryOrder) { if (jsxMap[name]) { appJsx = jsxMap[name]; break } }
+    if (!appJsx) {
+      // pick the largest jsx file (most likely the main component)
+      const sorted = Object.entries(jsxMap).sort((a,b) => b[1].length - a[1].length)
+      appJsx = sorted[0]?.[1] || ''
+    }
+    const allJsx = Object.values(jsxMap).filter(c => c && (c.includes('function ') || c.includes('=>') || c.includes('const '))).join('\n\n')
     const jsxCode = appJsx || allJsx
 
     // Extract CSS if any
@@ -361,16 +373,11 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
 
     /* \u2500\u2500 Mount: typeof checks work in Babel strict mode; eval() does NOT \u2500\u2500 */
     try {
-      const __comp =
-        typeof App         === 'function' ? App         :
-        typeof Calculator  === 'function' ? Calculator  :
-        typeof TodoApp     === 'function' ? TodoApp     :
-        typeof Main        === 'function' ? Main        :
-        typeof Page        === 'function' ? Page        :
-        typeof Application === 'function' ? Application :
-        typeof Dashboard   === 'function' ? Dashboard   :
-        typeof Component   === 'function' ? Component   :
-        null;
+      /* Auto-discover any exported React component — works regardless of what LLM named it */
+      const __names = ['App','Calculator','TodoApp','Counter','Timer','Weather','Notes',
+        'Expenses','Budget','Dashboard','Main','Page','Application','Component',
+        'Form','List','Quiz','Game','Chat','Search','Table','Chart','Profile','Settings'];
+      const __comp = __names.reduce((found, n) => found || (typeof window[n]==='function' ? window[n] : null), null);
 
       const __root = ReactDOM.createRoot(document.getElementById('root'));
       if (__comp) {
@@ -379,8 +386,8 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
         __root.render(
           React.createElement('div', { style: { padding: '32px', textAlign: 'center', color: '#64748b' } },
             React.createElement('h2', null, '\u26a0\ufe0f No Component Found'),
-            React.createElement('p', null, 'Expected a root component named: App, Calculator, Main, Page, Dashboard, etc.'),
-            React.createElement('p', { style: { fontSize: '12px', color: '#94a3b8' } }, 'Check the Code tab for the generated source.')
+            React.createElement('p', null, 'Expected a root component — switch to the Code tab to view the source.'),
+            React.createElement('p', { style: { fontSize: '12px', color: '#94a3b8' } }, 'Tip: Run the pipeline again with a frontend requirement.')
           )
         );
       }
@@ -400,13 +407,8 @@ function PreviewPanel({ taskStatus, onRunPipeline }) {
   }
 
   const hasCode = allFiles.length > 0
-  const hasFrontend = !!(
-    (unifiedCode && (unifiedCode['src/App.jsx'] || unifiedCode['src/app.jsx'] || unifiedCode['App.jsx'])) ||
-    (codeFiles.frontend_eng && Object.keys(codeFiles.frontend_eng).length > 0)
-  )
-
-  // Team label for code tab
-  const teamLabel = (key) => key.split('/')[0].replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
+  // hasFrontend = any .jsx/.tsx file present — LLM may name it anything (Calculator.jsx, App.jsx, etc.)
+  const hasFrontend = allFiles.some(f => f.fname.endsWith('.jsx') || f.fname.endsWith('.tsx'))
 
   const status = taskStatus?.status
 
@@ -891,7 +893,7 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
           const taskId = session.last_task_id
           // Spread the full run so top-level fields (activities, current_team, etc.)
           // are accessible directly on taskStatus — same shape as live-poll response.
-          setTaskStatus({ ...run, status: run.status || 'completed', result: run })
+          setTaskStatus({ ...run, status: run.status || 'completed', result: run.result || run })
           // Don't re-poll a restored task — it's already complete and the service
           // may have restarted (in-memory task_runs wiped). Polling would 404 forever.
           setPipelineHistory([
