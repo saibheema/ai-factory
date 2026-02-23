@@ -871,6 +871,7 @@ def run_phase2_handler(
     folder_id: str | None = None,
     all_code: dict[str, str] | None = None,
     shared_knowledge: str = "",  # key decisions from upstream teams
+    next_team: str = "",          # actual next team in THIS run's selected list
 ) -> Phase2StageArtifact:
     """Execute a Phase 2 stage for one team with real tool invocations."""
 
@@ -895,7 +896,10 @@ def run_phase2_handler(
         "docs_team": ("runbook and release notes", "feature_eng"),
         "feature_eng": ("feature closure and backlog sync", "none"),
     }
-    detail, handoff = specialized.get(team, ("team objective drafted", "none"))
+    detail, canonical_handoff = specialized.get(team, ("team objective drafted", "none"))
+    # Use the caller-supplied next_team when provided (smart-routed subset may skip
+    # canonical successors); fall back to the canonical value only when all teams run.
+    handoff = next_team if next_team else canonical_handoff
 
     # 2. Build effective requirement — prepend upstream knowledge so every team
     #    can see and build on what Sol Arch, BA, PM etc. decided before them.
