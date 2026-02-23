@@ -72,6 +72,40 @@ const ALL_TEAMS = [
   'security_eng','compliance','devops','qa_eng','sre_ops','docs_team','feature_eng',
 ]
 
+// Alias map mirrors the backend TEAM_ALIASES — used by @mention detection in group chat
+const TEAM_ALIASES = {
+  solarch: 'solution_arch', sol_arch: 'solution_arch', solution_arch: 'solution_arch',
+  arch: 'solution_arch', architect: 'solution_arch',
+  backend: 'backend_eng', backend_eng: 'backend_eng', be: 'backend_eng',
+  frontend: 'frontend_eng', frontend_eng: 'frontend_eng', fe: 'frontend_eng', ui: 'frontend_eng',
+  pm: 'product_mgmt', product: 'product_mgmt', product_mgmt: 'product_mgmt',
+  ba: 'biz_analysis', biz: 'biz_analysis', biz_analysis: 'biz_analysis',
+  api: 'api_design', api_design: 'api_design',
+  ux: 'ux_ui', ux_ui: 'ux_ui', design: 'ux_ui',
+  db: 'database_eng', database: 'database_eng', database_eng: 'database_eng',
+  data: 'data_eng', data_eng: 'data_eng',
+  ml: 'ml_eng', ml_eng: 'ml_eng',
+  security: 'security_eng', security_eng: 'security_eng', sec: 'security_eng',
+  compliance: 'compliance',
+  devops: 'devops', ops: 'devops',
+  sre: 'sre_ops', sre_ops: 'sre_ops',
+  qa: 'qa_eng', qa_eng: 'qa_eng', test: 'qa_eng',
+  docs: 'docs_team', docs_team: 'docs_team',
+  feature: 'feature_eng', features: 'feature_eng', feature_eng: 'feature_eng',
+}
+
+/** Return canonical team names extracted from @mention tokens in text. */
+function parseMentions(text) {
+  const found = [], seen = new Set()
+  const matches = text.match(/@([A-Za-z0-9_]+)/g) || []
+  for (const m of matches) {
+    const key = m.slice(1).toLowerCase()
+    const canonical = TEAM_ALIASES[key]
+    if (canonical && !seen.has(canonical)) { found.push(canonical); seen.add(canonical) }
+  }
+  return found
+}
+
 const NAV_DESCRIPTIONS = {
   chat: 'Chat with your AI coworker about the project.',
   pipeline: 'Describe a requirement — AI picks the right teams and runs the pipeline.',
@@ -1298,13 +1332,15 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                   const roundHeader = isMultiRound && d.round !== lastRound
                     ? (lastRound = d.round, <div key={`r${d.round}`} className="groupRoundLabel">Round {d.round}</div>)
                     : null
+                  const wasTagged = msg.result.tagged_teams?.includes(d.team)
                   return (
                     <React.Fragment key={i}>
                       {roundHeader}
-                      <div className="groupDiscussionCard">
+                      <div className={`groupDiscussionCard ${wasTagged ? 'groupCardTagged' : ''}`}>
                         <div className="groupDiscussionTeam">
                           <Users size={13} />
                           <strong>{formatTeamName(d.team)}</strong>
+                          {wasTagged && <span className="groupTaggedBadge">@ mentioned</span>}
                           {d.source && d.source !== 'fallback' && (
                             <span className="groupSourceBadge">{d.source.split(':')[0]}</span>
                           )}
@@ -2178,6 +2214,21 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                 <span>Follow-up mode — your next request will extend the existing code</span>
               </div>
             )}
+            {activeTab === 'group' && (() => {
+              const mentioned = parseMentions(inputMessage)
+              return mentioned.length > 0 ? (
+                <div className="mentionRoutingBar">
+                  <span className="mentionRoutingIcon">@</span>
+                  <span>Asking only:</span>
+                  {mentioned.map(t => <span key={t} className="mentionChip">{formatTeamName(t)}</span>)}
+                  <span className="mentionRoutingNote">other participants ignored</span>
+                </div>
+              ) : (
+                <div className="mentionHintBar">
+                  <span>💡 Tag a team to ask them directly — e.g. <code>@solArch</code>, <code>@backend</code>, <code>@qa</code></span>
+                </div>
+              )
+            })()}
             <form onSubmit={handleSubmit} className="inputForm">
               <input type="text" value={inputMessage} onChange={e => setInputMessage(e.target.value)}
                 placeholder={
@@ -2186,7 +2237,7 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                     ? (taskStatus?.result?.code_files && Object.keys(taskStatus.result.code_files).length > 0
                         ? 'Describe a change or fix to apply...'
                         : 'Describe a requirement to build...')
-                    : 'Enter a topic...'
+                    : 'Ask all or tag specific teams — e.g. @solArch what did you decide about the DB schema?'
                 }
                 disabled={loading} />
               <button type="submit" disabled={!inputMessage.trim() || loading} className="sendBtn">

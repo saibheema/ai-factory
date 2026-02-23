@@ -96,6 +96,9 @@ hitl_service_url = os.getenv("HITL_SERVICE_URL", "http://hitl:8007")
 # Teams list for knowledge sharing
 ALL_TEAMS = list(phase2_pipeline.teams)
 
+# @mention routing helpers — shared with frontend via TEAM_ALIASES map
+from factory.groupchat.mentions import TEAM_ALIASES, parse_mentions as _parse_mentions
+
 # ═══════════════════════════════════════════════════════════
 #  Lazy-init persistent stores (Firestore / GCS / Git)
 # ═══════════════════════════════════════════════════════════
@@ -1547,28 +1550,46 @@ def project_group_chat(
     body: GroupChatRequest,
     user: AuthUser = Depends(get_current_user),
 ) -> dict:
-    participants = body.participants or phase2_pipeline.teams[:5]
+    # ── @mention routing: if topic contains @tags, only those teams respond ──
+    mentioned = _parse_mentions(body.topic)
+    if mentioned:
+        participants = mentioned
+    else:
+        participants = body.participants or phase2_pipeline.teams[:5]
 
-    # ── Build rich context: memory + last pipeline run ────────────────────
-    context_parts: list[str] = []
+    # ── Build rich per-team context from persisted memory ─────────────────
+    # Fetch up to 10 memory items per team (500 chars each) so reopened
+    # projects have full context about their prior work on this project.
+    team_contexts: dict[str, str] = {}
     try:
         snapshot = _get_firestore().memory_snapshot(user.uid, project_id)
     except Exception:
         snapshot = memory.snapshot()
     for p in participants:
         bank_items = snapshot.get(f"team-{p}", [])
-        relevant = [i for i in bank_items if isinstance(i, str) and i.startswith(f"{project_id}:")][:3]
+        relevant = [
+            i for i in bank_items
+            if isinstance(i, str) and i.startswith(f"{project_id}:")
+        ][:10]
         if relevant:
-            context_parts.append(f"[{p}] " + "; ".join(r.split(":", 1)[-1][:150] for r in relevant))
+            team_contexts[p] = "\n".join(r.split(":", 1)[-1][:500] for r in relevant)
+
+    # Last pipeline requirement gives shared context about what was built
+    last_requirement = ""
     try:
         runs = _get_firestore().list_runs(user.uid, project_id, limit=1)
         if runs:
-            last_req = runs[0].get("requirement", "")
-            if last_req:
-                context_parts.insert(0, f"Last pipeline requirement: {last_req[:250]}")
+            last_requirement = runs[0].get("requirement", "")[:400]
     except Exception:
         pass
-    full_context = "\n".join(context_parts)
+
+    full_context = (
+        (f"Last pipeline requirement: {last_requirement}\n\n" if last_requirement else "")
+        + "\n".join(
+            f"[{p}] Prior work:\n{team_contexts[p]}"
+            for p in participants if p in team_contexts
+        )
+    )
 
     # ── Try the dedicated groupchat service (proper multi-turn A2A) ────────
     try:
@@ -1584,19 +1605,19 @@ def project_group_chat(
             )
             resp.raise_for_status()
             gc = resp.json()
-            # Normalise: groupchat service uses 'message'; unify to 'message'
             for d in gc.get("discussion", []):
                 d.setdefault("message", d.get("summary", ""))
             return {
                 "project_id": project_id,
                 "topic": body.topic,
                 "participants": participants,
+                "tagged_teams": mentioned,
                 **gc,
             }
     except Exception as _gc_exc:
         log.warning("Groupchat service unavailable — using inline A2A LLM: %s", _gc_exc)
 
-    # ── Fallback: inline A2A LLM with full prior-turn context ─────────────
+    # ── Fallback: inline A2A LLM with full prior-turn + per-team context ──
     plan = ["align-on-goal", "split-by-team", "collect-findings", "decide-next-actions"]
     discussion: list[dict] = []
 
@@ -1606,15 +1627,18 @@ def project_group_chat(
                 f"  {d['team'].replace('_',' ')}: {d['message'][:250]}"
                 for d in discussion[-6:]
             )
+            team_mem = team_contexts.get(p, "")
             prompt = (
-                f"You are the {p.replace('_', ' ')} team lead in a live engineering group discussion.\n"
-                f"Project: {project_id}  |  Topic: {body.topic}\n"
-                + (f"Project context:\n{full_context[:600]}\n\n" if full_context else "")
+                f"You are the {p.replace('_', ' ')} team lead answering on project '{project_id}'.\n"
+                + (f"Topic / question: {body.topic}\n" if not mentioned
+                   else f"You were directly asked (@{p}): {body.topic}\n")
+                + (f"\nYour prior work on this project:\n{team_mem[:800]}\n" if team_mem else "")
+                + (f"\nProject context:\n{full_context[:400]}\n" if full_context else "")
                 + (
-                    f"Discussion so far (read carefully — reference it in your reply):\n{prior_lines}\n\n"
-                    if prior_lines else "You are the first to speak.\n\n"
+                    f"\nDiscussion so far:\n{prior_lines}\n\n"
+                    if prior_lines else "\nYou are the first to speak.\n\n"
                 )
-                + "Respond in 2-4 sentences. Be direct, technical, and build on what was said."
+                + "Respond in 2-4 sentences. Be direct, technical, and reference your project work."
             )
             try:
                 result = llm_runtime.generate(team=p, requirement=prompt, prior_count=0, handoff_to="none")
@@ -1666,6 +1690,7 @@ def project_group_chat(
         "project_id": project_id,
         "topic": body.topic,
         "participants": participants,
+        "tagged_teams": mentioned,
         "plan": plan,
         "discussion": discussion,
         "consensus": consensus,
