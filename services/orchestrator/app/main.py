@@ -29,7 +29,11 @@ from starlette.responses import JSONResponse, PlainTextResponse, StreamingRespon
 
 from factory.auth.firebase_auth import AuthUser, get_current_user
 from factory.clarification.broker import ClarificationBroker
-from factory.agents.phase2_handlers import extract_handoff_to, run_phase2_handler
+from factory.agents.phase2_handlers import (
+    extract_handoff_to,
+    get_tool_recovery_question,
+    run_phase2_handler,
+)
 from factory.agents.task_result import TaskResult
 from factory.llm.runtime import TeamLLMRuntime
 from factory.memory.decision_log import DecisionLog, TEAM_DECISION_TYPE
@@ -145,6 +149,58 @@ _watchers_lock = threading.Lock()
 # Heal history — keyed by project_id (last 50 entries)
 _heal_history: dict[str, list] = defaultdict(list)
 _heal_history_lock = threading.Lock()
+
+# ═══════════════════════════════════════════════════════════
+#  Session-scoped credentials (in-memory, never persisted)
+#  Keyed by uid; cleared on server restart.
+# ═══════════════════════════════════════════════════════════
+_SESSION_CREDS: dict[str, dict[str, str]] = {}
+_SESSION_CREDS_LOCK = threading.Lock()
+
+
+def _get_session_creds(uid: str) -> dict[str, str]:
+    with _SESSION_CREDS_LOCK:
+        return dict(_SESSION_CREDS.get(uid, {}))
+
+
+def _set_session_cred(uid: str, key: str, value: str) -> None:
+    with _SESSION_CREDS_LOCK:
+        if uid not in _SESSION_CREDS:
+            _SESSION_CREDS[uid] = {}
+        _SESSION_CREDS[uid][key] = value
+    log.info("Session cred stored for uid=%s key=%s", uid[:8], key)
+
+
+# Known credential key names (used for parsing from chat messages)
+_KNOWN_CRED_KEYS = {
+    "PLANE_API_KEY", "PLANE_WORKSPACE_SLUG",
+    "SLACK_BOT_TOKEN",
+    "CONFLUENCE_URL", "CONFLUENCE_USER", "CONFLUENCE_API_TOKEN",
+    "JIRA_URL", "JIRA_USER", "JIRA_API_TOKEN",
+    "TAVILY_API_KEY",
+    "GOOGLE_SA_JSON",
+    "GIT_TOKEN", "GITHUB_TOKEN",
+    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+    "PAGERDUTY_API_KEY", "DATADOG_API_KEY",
+}
+
+# Regex to detect KEY=value patterns in chat messages
+_CRED_PATTERN = re.compile(
+    r"\b([A-Z][A-Z0-9_]{3,40})\s*=\s*([^\s,;\"']+)",
+    re.IGNORECASE,
+)
+
+
+def _parse_creds_from_message(text: str) -> dict[str, str]:
+    """Extract KEY=value credential pairs from a free-text message."""
+    found: dict[str, str] = {}
+    for m in _CRED_PATTERN.finditer(text):
+        key = m.group(1).upper()
+        val = m.group(2).strip()
+        if key in _KNOWN_CRED_KEYS and len(val) >= 4:
+            found[key] = val
+    return found
+
 
 # Lazy SelfHealAgent
 _self_heal_agent = None
@@ -384,6 +440,8 @@ def _run_full_pipeline_tracked(
     Persists progress to Firestore, artifacts to GCS or Git.
     """
     teams = _select_teams(req.requirement, llm_runtime)
+    # Snapshot session creds at pipeline start (immutable for this run)
+    _screds = _get_session_creds(uid)
     run_state = {
         "task_id": task_id,
         "project_id": req.project_id,
@@ -532,7 +590,21 @@ def _run_full_pipeline_tracked(
                 all_code=flat_code or None,
                 shared_knowledge="\n\n".join(shared_knowledge_parts),
                 next_team=teams[idx + 1] if idx + 1 < len(teams) else "none",
+                session_creds=_screds or None,
             )
+
+            # ── Recovery: scan for failed tools and post questions to group chat ────
+            _failed_tools = [te for te in getattr(stage, "tools_used", []) if not te.success]
+            for _failed in _failed_tools:
+                _recovery_q = get_tool_recovery_question(_failed.tool, _failed.error or "")
+                if _recovery_q:
+                    _push_comms(
+                        task_id, team, "user",
+                        "recovery_needed",
+                        f"⚠️ {team.replace('_', ' ').title()} — {_failed.tool} failed. "
+                        f"{_recovery_q}",
+                    )
+                    log.info("Recovery question posted for %s tool=%s", team, _failed.tool)
 
             artifacts[team] = stage.artifact
             # Collect code files for preview and git push — MERGE with prior, don't replace
@@ -756,6 +828,51 @@ def _run_full_pipeline_tracked(
             st["error"] = str(exc)
             st["updated_at"] = datetime.now(UTC).isoformat()
         _task_store_save(task_id, run_state, uid, req.project_id)
+
+
+# ═══════════════════════════════════════════════════════════
+#  SESSION CREDENTIALS — in-memory, never persisted
+# ═══════════════════════════════════════════════════════════
+
+class SessionCredRequest(BaseModel):
+    key: str = Field(min_length=2)
+    value: str = Field(min_length=1)
+
+
+@app.post("/api/session/creds", status_code=201)
+def store_session_cred(
+    body: SessionCredRequest,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Store a credential for this session only (never written to disk or DB).
+
+    The key is injected into os.environ for the duration of each pipeline run
+    for this user, then restored. Values are discarded on server restart.
+    """
+    _set_session_cred(user.uid, body.key.upper(), body.value)
+    return {"status": "stored", "key": body.key.upper(),
+            "note": "Active for this session only — never persisted."}
+
+
+@app.get("/api/session/creds")
+def list_session_creds(
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Return which credential keys are stored for this session (values hidden)."""
+    with _SESSION_CREDS_LOCK:
+        keys = list(_SESSION_CREDS.get(user.uid, {}).keys())
+    return {"keys": keys, "count": len(keys)}
+
+
+@app.delete("/api/session/creds/{key}")
+def delete_session_cred(
+    key: str,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Remove a single session credential."""
+    with _SESSION_CREDS_LOCK:
+        removed = _SESSION_CREDS.get(user.uid, {}).pop(key.upper(), None)
+    return {"status": "removed" if removed is not None else "not_found", "key": key.upper()}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1550,6 +1667,11 @@ def project_group_chat(
     body: GroupChatRequest,
     user: AuthUser = Depends(get_current_user),
 ) -> dict:
+    # ── Auto-extract credentials from message and store in session ────────
+    detected_creds = _parse_creds_from_message(body.topic)
+    for _ckey, _cval in detected_creds.items():
+        _set_session_cred(user.uid, _ckey, _cval)
+
     # ── @mention routing: if topic contains @tags, only those teams respond ──
     mentioned = _parse_mentions(body.topic)
     if mentioned:
@@ -1612,6 +1734,7 @@ def project_group_chat(
                 "topic": body.topic,
                 "participants": participants,
                 "tagged_teams": mentioned,
+                "detected_creds": list(detected_creds.keys()),
                 **gc,
             }
     except Exception as _gc_exc:
@@ -1691,6 +1814,7 @@ def project_group_chat(
         "topic": body.topic,
         "participants": participants,
         "tagged_teams": mentioned,
+        "detected_creds": list(detected_creds.keys()),
         "plan": plan,
         "discussion": discussion,
         "consensus": consensus,

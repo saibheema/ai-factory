@@ -9,6 +9,7 @@ Every team:
 """
 
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -16,6 +17,50 @@ from factory.llm.runtime import TeamLLMRuntime
 from factory.tools.team_tools import TEAM_TOOLS, get_team_tools
 
 log = logging.getLogger(__name__)
+
+# ─── Tool recovery maps ───────────────────────────────────────────────────────
+# Maps tool names to the env-var keys they need (for session-cred injection).
+_TOOL_REQUIRED_KEYS: dict[str, list[str]] = {
+    "plane":         ["PLANE_API_KEY", "PLANE_WORKSPACE_SLUG"],
+    "slack":         ["SLACK_BOT_TOKEN"],
+    "confluence":    ["CONFLUENCE_URL", "CONFLUENCE_USER", "CONFLUENCE_API_TOKEN"],
+    "jira":          ["JIRA_URL", "JIRA_USER", "JIRA_API_TOKEN"],
+    "tavily_search": ["TAVILY_API_KEY"],
+    "google_docs":   ["GOOGLE_SA_JSON"],
+    "google_sheets": ["GOOGLE_SA_JSON"],
+    "git":           ["GIT_TOKEN"],
+}
+
+# Human-readable recovery prompts shown in group chat when a tool fails.
+_TOOL_RECOVERY_QUESTIONS: dict[str, str] = {
+    "plane":         "I need a Plane.so API key to create project issues. Share in group chat: PLANE_API_KEY=your_key  PLANE_WORKSPACE_SLUG=your_slug",
+    "slack":         "I need a Slack Bot Token to post notifications. Share: SLACK_BOT_TOKEN=xoxb-xxx",
+    "confluence":    "I need Confluence credentials to publish docs. Share: CONFLUENCE_URL=https://... CONFLUENCE_USER=email CONFLUENCE_API_TOKEN=token",
+    "jira":          "I need Jira credentials to create issues. Share: JIRA_URL=https://... JIRA_USER=email JIRA_API_TOKEN=token",
+    "tavily_search": "Research is limited — Tavily key missing. Share: TAVILY_API_KEY=tvly-xxx for richer tech research.",
+    "google_docs":   "I need a Google Service Account to create Docs. Share: GOOGLE_SA_JSON=<base64-encoded-sa-json>",
+    "google_sheets": "I need a Google Service Account to create Sheets. Share: GOOGLE_SA_JSON=<base64-encoded-sa-json>",
+    "git":           "I need a Git token to push code. Go to Settings → GitHub Token to configure, or share: GIT_TOKEN=ghp_xxx",
+    "trivy":         "Trivy CLI is not installed in the container. DevOps needs to add it to the Dockerfile (apt-get install trivy).",
+    "gitleaks":      "Gitleaks CLI is not installed. DevOps needs to add it to the Dockerfile.",
+    "checkov":       "Checkov is not installed. Add to requirements.txt: checkov>=3.0.0, or DevOps can add it to the image.",
+    "semgrep":       "Semgrep CLI is not installed. DevOps needs to add it to the Dockerfile.",
+    "ruff":          "Ruff found code style violations in the generated code. The code works but needs formatting — re-run with 'clean up the code style' to auto-fix.",
+    "black":         "Black found formatting issues in the generated code. Re-run with 'fix code formatting' to apply.",
+    "mypy":          "mypy found type errors in the generated code. Re-run with 'fix type errors' to resolve.",
+    "bandit":        "Bandit found security issues in the generated code. Re-run with 'fix security issues' to address.",
+}
+
+
+def get_tool_recovery_question(tool: str, error: str = "") -> str | None:
+    """Return a user-facing recovery question for a failed tool, or None if no advice."""
+    q = _TOOL_RECOVERY_QUESTIONS.get(tool)
+    if q:
+        return q
+    # Generic fallback for unexpected errors
+    if error:
+        return f"Tool '{tool}' failed: {error[:120]}. Check configuration or share the required credentials in group chat."
+    return None
 
 
 def _strip_fences(code: str) -> str:
@@ -870,10 +915,51 @@ def run_phase2_handler(
     git_token: str = "",
     folder_id: str | None = None,
     all_code: dict[str, str] | None = None,
-    shared_knowledge: str = "",  # key decisions from upstream teams
-    next_team: str = "",          # actual next team in THIS run's selected list
+    shared_knowledge: str = "",   # key decisions from upstream teams
+    next_team: str = "",           # actual next team in THIS run's selected list
+    session_creds: dict[str, str] | None = None,  # user-provided keys for this session
 ) -> Phase2StageArtifact:
     """Execute a Phase 2 stage for one team with real tool invocations."""
+    # ── Temporarily inject session-supplied credentials into os.environ ────────
+    # Each pipeline run is a dedicated thread so this is thread-safe.
+    # We restore the original values on exit (even on exception).
+    _env_backup: dict[str, str | None] = {}
+    if session_creds:
+        for _k, _v in session_creds.items():
+            _env_backup[_k] = os.environ.get(_k)
+            os.environ[_k] = _v
+        log.debug("session_creds injected for %s: %s", team, list(session_creds.keys()))
+    try:
+        return _run_phase2_handler_body(
+            team=team, requirement=requirement, prior_count=prior_count,
+            llm_runtime=llm_runtime, uid=uid, project_id=project_id,
+            git_url=git_url, git_token=git_token, folder_id=folder_id,
+            all_code=all_code, shared_knowledge=shared_knowledge, next_team=next_team,
+        )
+    finally:
+        for _k, _orig in _env_backup.items():
+            if _orig is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _orig
+
+
+def _run_phase2_handler_body(
+    team: str,
+    requirement: str,
+    prior_count: int,
+    llm_runtime: TeamLLMRuntime | None = None,
+    *,
+    uid: str = "",
+    project_id: str = "",
+    git_url: str = "",
+    git_token: str = "",
+    folder_id: str | None = None,
+    all_code: dict[str, str] | None = None,
+    shared_knowledge: str = "",
+    next_team: str = "",
+) -> Phase2StageArtifact:
+    """Internal implementation — called after session creds are injected."""
 
     # 1. Team config
     tool_cfg = get_team_tools(team)

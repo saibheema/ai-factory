@@ -949,6 +949,9 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   const commsEndRef = useRef(null)
   useEffect(() => { commsEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [commsEvents])
 
+  /* Session credentials (in-memory keys shared in group chat) */
+  const [sessionCredKeys, setSessionCredKeys] = useState([])
+
   /* Clone Repo state */
   const [cloneUrl, setCloneUrl] = useState('')
   const [cloneLoading, setCloneLoading] = useState(false)
@@ -1301,8 +1304,17 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
     const data = await handleApi(() => api(`/api/projects/${projectId}/group-chat`, {
       method: 'POST', body: JSON.stringify({ topic, participants: groupParticipants, max_turns: groupMaxTurns }),
     }))
-    if (data) setGroupHistory(prev => [...prev, { id: Date.now(), role: 'assistant', text: 'Group chat completed.', result: data }])
-    else setGroupHistory(prev => [...prev, { id: Date.now(), role: 'assistant', text: 'Error occurred.' }])
+    if (data) {
+      setGroupHistory(prev => [...prev, { id: Date.now(), role: 'assistant', text: 'Group chat completed.', result: data }])
+      if (data.detected_creds?.length > 0) {
+        setSessionCredKeys(prev => [...new Set([...prev, ...data.detected_creds])])
+      }
+    } else setGroupHistory(prev => [...prev, { id: Date.now(), role: 'assistant', text: 'Error occurred.' }])
+  }
+
+  async function removeSessionCred(key) {
+    try { await api(`/api/session/creds/${key}`, { method: 'DELETE' }) } catch (_) {}
+    setSessionCredKeys(prev => prev.filter(k => k !== key))
   }
 
   const handleSubmit = e => {
@@ -1516,7 +1528,11 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                 title={NAV_DESCRIPTIONS[item.key]}>
                 <Icon size={18} />{item.label}
                 {item.key === 'comms' && commsEvents.length > 0 && (
-                  <span className="notifBadge" style={{ marginLeft: 'auto', fontSize: 10 }}>{commsEvents.length}</span>
+                  <span className="notifBadge" style={{ marginLeft: 'auto', fontSize: 10 }}>
+                    {commsEvents.filter(e => e.type === 'recovery_needed').length > 0
+                      ? `⚠️ ${commsEvents.filter(e => e.type === 'recovery_needed').length}`
+                      : commsEvents.length}
+                  </span>
                 )}
               </button>
             )
@@ -1627,6 +1643,19 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
             </div>
           )}
 
+          {/* Session Creds Bar — shown in group tab when keys are stored */}
+          {activeTab === 'group' && sessionCredKeys.length > 0 && (
+            <div className="sessionCredsBar">
+              <span className="sessionCredsLabel">🔑 Session keys active:</span>
+              {sessionCredKeys.map(k => (
+                <span key={k} className="sessionCredChip">
+                  {k}
+                  <button className="sessionCredRemove" onClick={() => removeSessionCred(k)} title="Remove">×</button>
+                </span>
+              ))}
+            </div>
+          )}
+
           {/* Agent Comms */}
           {activeTab === 'comms' && (
             <div className="commsContainer">
@@ -1649,6 +1678,16 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                       context: '📋',
                       status: '⚡',
                       clarification: '❓',
+                      recovery_needed: '⚠️',
+                    }
+                    if (evt.type === 'recovery_needed') {
+                      return (
+                        <div key={i} className="recoveryCard">
+                          <div className="recoveryCardTitle">⚠️ Tool Recovery Needed — {formatTeamName(evt.from_team)}</div>
+                          <div className="recoveryCardMessage">{evt.message}</div>
+                          <div className="recoveryCardHint">💬 Reply in Group Chat with the required value — e.g. <code>SLACK_BOT_TOKEN=xoxb-…</code></div>
+                        </div>
+                      )
                     }
                     return (
                       <div key={i} className={`commsEvent type-${evt.type}`}>
@@ -2225,7 +2264,7 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                 </div>
               ) : (
                 <div className="mentionHintBar">
-                  <span>💡 Tag a team to ask them directly — e.g. <code>@solArch</code>, <code>@backend</code>, <code>@qa</code></span>
+                  <span>💡 Tag a team: <code>@solArch</code>, <code>@backend</code>, <code>@qa</code> — or share credentials to unlock failing tools: <code>SLACK_BOT_TOKEN=xoxb-…</code></span>
                 </div>
               )
             })()}

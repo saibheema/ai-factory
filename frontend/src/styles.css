@@ -914,6 +914,46 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin { animation: spin 1s linear infinite; }
 
+/* ── Tool Recovery Cards ──────────────────────────────── */
+.recoveryCard {
+  background: #fffbeb; border: 1px solid #f59e0b;
+  border-left: 4px solid #d97706;
+  border-radius: 8px; padding: 10px 14px; margin: 6px 0;
+  animation: recoveryPulse 2s ease-in-out 3;
+}
+@keyframes recoveryPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,0); }
+  50% { box-shadow: 0 0 0 4px rgba(245,158,11,0.25); }
+}
+.recoveryCardTitle { color: #92400e; font-weight: 700; font-size: 12px; margin-bottom: 5px; }
+.recoveryCardMessage { font-size: 13px; color: #78350f; line-height: 1.5; }
+.recoveryCardHint {
+  margin-top: 7px; font-size: 11px; color: #b45309;
+  padding: 5px 8px; background: #fef3c7; border-radius: 4px;
+}
+.recoveryCardHint code { background: #fde68a; padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+
+/* ── Session Creds Bar ────────────────────────────────── */
+.sessionCredsBar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 6px 16px; background: #0f172a;
+  border-bottom: 1px solid #1e293b;
+  flex-shrink: 0;
+}
+.sessionCredsLabel { font-size: 11px; color: #64748b; font-weight: 600; }
+.sessionCredChip {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: #0f766e; color: #99f6e4;
+  border-radius: 10px; padding: 2px 8px;
+  font-size: 11px; font-weight: 600;
+}
+.sessionCredRemove {
+  background: none; border: none; cursor: pointer;
+  color: #5eead4; font-size: 13px; line-height: 1;
+  padding: 0 2px; display: flex; align-items: center;
+}
+.sessionCredRemove:hover { color: #fff; }
+
 /* Responsive */
 @media (max-width: 768px) {
   .projectSelectorBody { grid-template-columns: 1fr; }
