@@ -227,8 +227,9 @@ class ProjectChatRequest(BaseModel):
 
 
 class GroupChatRequest(BaseModel):
-    topic: str = Field(min_length=3)
+    topic: str = Field(min_length=1)
     participants: list[str] = Field(default_factory=list)
+    max_turns: int = Field(default=1, ge=1, le=3)
 
 
 class ProjectCreateRequest(BaseModel):
@@ -1455,7 +1456,7 @@ def get_project_session(
 
 
 # ═══════════════════════════════════════════════════════════
-#  GROUP CHAT
+#  GROUP CHAT — A2A multi-agent discussion
 # ═══════════════════════════════════════════════════════════
 @app.post("/api/projects/{project_id}/group-chat")
 def project_group_chat(
@@ -1464,27 +1465,9 @@ def project_group_chat(
     user: AuthUser = Depends(get_current_user),
 ) -> dict:
     participants = body.participants or phase2_pipeline.teams[:5]
-    mem_map = project_memory_map(project_id, user)
 
-    plan: list[str]
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.post(
-                f"{groupchat_service_url}/session/plan",
-                json={"topic": body.topic, "participants": participants},
-            )
-            resp.raise_for_status()
-            plan = list(resp.json().get("plan", []))
-    except Exception:
-        plan = [
-            "align-on-goal",
-            "split-by-team",
-            "collect-findings",
-            "decide-next-actions",
-        ]
-
-    # Build context from memory for each participant
-    context_parts = []
+    # ── Build rich context: memory + last pipeline run ────────────────────
+    context_parts: list[str] = []
     try:
         snapshot = _get_firestore().memory_snapshot(user.uid, project_id)
     except Exception:
@@ -1494,24 +1477,107 @@ def project_group_chat(
         relevant = [i for i in bank_items if isinstance(i, str) and i.startswith(f"{project_id}:")][:3]
         if relevant:
             context_parts.append(f"[{p}] " + "; ".join(r.split(":", 1)[-1][:150] for r in relevant))
+    try:
+        runs = _get_firestore().list_runs(user.uid, project_id, limit=1)
+        if runs:
+            last_req = runs[0].get("requirement", "")
+            if last_req:
+                context_parts.insert(0, f"Last pipeline requirement: {last_req[:250]}")
+    except Exception:
+        pass
+    full_context = "\n".join(context_parts)
 
-    # Have each participant contribute via LLM
-    discussion = []
-    for p in participants:
-        prompt = (
-            f"You are the {p.replace('_',' ')} team lead in a group discussion.\n"
-            f"Topic: {body.topic}\n"
-            f"Project: {project_id}\n"
-            f"Context from memory: {'; '.join(context_parts[:3]) or 'No prior context'}\n"
-            f"Previous discussion: {'; '.join(d['summary'][:100] for d in discussion[-3:]) if discussion else 'Starting discussion'}\n\n"
-            f"Provide your team's perspective in 2-3 sentences. Be specific and actionable."
-        )
+    # ── Try the dedicated groupchat service (proper multi-turn A2A) ────────
+    try:
+        with httpx.Client(timeout=120.0) as client:
+            resp = client.post(
+                f"{groupchat_service_url}/session/discuss",
+                json={
+                    "topic": body.topic,
+                    "participants": participants,
+                    "max_turns": body.max_turns,
+                    "context": full_context,
+                },
+            )
+            resp.raise_for_status()
+            gc = resp.json()
+            # Normalise: groupchat service uses 'message'; unify to 'message'
+            for d in gc.get("discussion", []):
+                d.setdefault("message", d.get("summary", ""))
+            return {
+                "project_id": project_id,
+                "topic": body.topic,
+                "participants": participants,
+                **gc,
+            }
+    except Exception as _gc_exc:
+        log.warning("Groupchat service unavailable — using inline A2A LLM: %s", _gc_exc)
+
+    # ── Fallback: inline A2A LLM with full prior-turn context ─────────────
+    plan = ["align-on-goal", "split-by-team", "collect-findings", "decide-next-actions"]
+    discussion: list[dict] = []
+
+    for _turn in range(max(1, body.max_turns)):
+        for p in participants:
+            prior_lines = "\n".join(
+                f"  {d['team'].replace('_',' ')}: {d['message'][:250]}"
+                for d in discussion[-6:]
+            )
+            prompt = (
+                f"You are the {p.replace('_', ' ')} team lead in a live engineering group discussion.\n"
+                f"Project: {project_id}  |  Topic: {body.topic}\n"
+                + (f"Project context:\n{full_context[:600]}\n\n" if full_context else "")
+                + (
+                    f"Discussion so far (read carefully — reference it in your reply):\n{prior_lines}\n\n"
+                    if prior_lines else "You are the first to speak.\n\n"
+                )
+                + "Respond in 2-4 sentences. Be direct, technical, and build on what was said."
+            )
+            try:
+                result = llm_runtime.generate(team=p, requirement=prompt, prior_count=0, handoff_to="none")
+                content = (result.content.strip() if result and result.content
+                           else f"[{p.replace('_',' ')}] Reviewing '{body.topic}' — will align with team.")
+                source = result.source if result else "fallback"
+            except Exception:
+                content = f"[{p.replace('_',' ')}] Reviewing '{body.topic}' — will align with team."
+                source = "fallback"
+            discussion.append({
+                "round": _turn + 1,
+                "team": p,
+                "message": content,
+                "source": source,
+            })
+
+    # ── Consensus synthesis via solution_arch ─────────────────────────────
+    consensus = f"Teams reached consensus on: {body.topic}"
+    action_items: list[str] = []
+    if llm_runtime.enabled:
         try:
-            result = llm_runtime.generate(team=p, requirement=prompt, prior_count=0, handoff_to="none")
-            content = result.content if result and result.content else f"{p}: Acknowledged topic '{body.topic}'. Will review and align with team objectives."
+            transcript = "\n".join(f"{d['team'].replace('_',' ')}: {d['message'][:200]}" for d in discussion)
+            synth_prompt = (
+                f"Summarise this multi-team engineering discussion.\n\n"
+                f"Topic: {body.topic}\n\nTranscript:\n{transcript}\n\n"
+                f"Reply in EXACTLY this format:\n"
+                f"CONSENSUS: <one sentence>\n"
+                f"ACTION_1: <action item>\nACTION_2: <action item>\nACTION_3: <action item>\n"
+            )
+            synth = llm_runtime.generate(team="solution_arch", requirement=synth_prompt, prior_count=0, handoff_to="none")
+            if synth and synth.content:
+                for line in synth.content.splitlines():
+                    if line.startswith("CONSENSUS:"):
+                        consensus = line.split(":", 1)[1].strip()
+                    elif line.startswith("ACTION_"):
+                        item = line.split(":", 1)[1].strip()
+                        if item:
+                            action_items.append(item)
         except Exception:
-            content = f"{p}: Acknowledged topic '{body.topic}'. Will review and align with team objectives."
-        discussion.append({"team": p, "summary": content, "topic": body.topic})
+            pass
+    if not action_items:
+        action_items = [
+            f"Implement the agreed solution for: {body.topic}",
+            "Schedule follow-up review in 48 hours",
+            "Update project documentation with decisions",
+        ]
 
     return {
         "project_id": project_id,
@@ -1519,6 +1585,8 @@ def project_group_chat(
         "participants": participants,
         "plan": plan,
         "discussion": discussion,
+        "consensus": consensus,
+        "action_items": action_items,
     }
 
 

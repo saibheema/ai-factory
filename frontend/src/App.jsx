@@ -847,6 +847,7 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   const [memoryMap, setMemoryMap] = useState(null)
   const [selectedMemoryNode, setSelectedMemoryNode] = useState(null)
   const [groupParticipants, setGroupParticipants] = useState(['backend_eng','qa_eng','docs_team'])
+  const [groupMaxTurns, setGroupMaxTurns] = useState(1)
   const [trackedTaskId, setTrackedTaskId] = useState('')
   const [taskStatus, setTaskStatus] = useState(null)
 
@@ -1212,7 +1213,7 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   async function runGroupChat(topic) {
     setGroupHistory(prev => [...prev, { id: Date.now(), role: 'user', text: topic }])
     const data = await handleApi(() => api(`/api/projects/${projectId}/group-chat`, {
-      method: 'POST', body: JSON.stringify({ topic, participants: groupParticipants }),
+      method: 'POST', body: JSON.stringify({ topic, participants: groupParticipants, max_turns: groupMaxTurns }),
     }))
     if (data) setGroupHistory(prev => [...prev, { id: Date.now(), role: 'assistant', text: 'Group chat completed.', result: data }])
     else setGroupHistory(prev => [...prev, { id: Date.now(), role: 'assistant', text: 'Error occurred.' }])
@@ -1236,16 +1237,53 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
           {/* Group chat discussion cards */}
           {msg.result?.discussion && (
             <div className="groupDiscussion">
-              {msg.result.discussion.map((d, i) => (
-                <div key={i} className="groupDiscussionCard">
-                  <div className="groupDiscussionTeam">
-                    <Users size={13} />
-                    <strong>{formatTeamName(d.team)}</strong>
-                  </div>
-                  <div className="groupDiscussionText">{d.summary}</div>
+              {/* Agent turns — grouped by round if multi-turn */}
+              {(() => {
+                const turns = msg.result.discussion
+                const isMultiRound = turns.some(d => d.round > 1)
+                let lastRound = 0
+                return turns.map((d, i) => {
+                  const roundHeader = isMultiRound && d.round !== lastRound
+                    ? (lastRound = d.round, <div key={`r${d.round}`} className="groupRoundLabel">Round {d.round}</div>)
+                    : null
+                  return (
+                    <React.Fragment key={i}>
+                      {roundHeader}
+                      <div className="groupDiscussionCard">
+                        <div className="groupDiscussionTeam">
+                          <Users size={13} />
+                          <strong>{formatTeamName(d.team)}</strong>
+                          {d.source && d.source !== 'fallback' && (
+                            <span className="groupSourceBadge">{d.source.split(':')[0]}</span>
+                          )}
+                        </div>
+                        <div className="groupDiscussionText">{d.message || d.summary}</div>
+                      </div>
+                    </React.Fragment>
+                  )
+                })
+              })()}
+
+              {/* Consensus block */}
+              {msg.result.consensus && (
+                <div className="groupConsensusCard">
+                  <div className="groupConsensusTitle"><CheckCircle2 size={13} /> Consensus</div>
+                  <div className="groupConsensusText">{msg.result.consensus}</div>
+                  {msg.result.action_items?.length > 0 && (
+                    <div className="groupActions">
+                      {msg.result.action_items.map((a, i) => (
+                        <div key={i} className="groupActionItem">
+                          <span className="groupActionNum">{i + 1}</span>
+                          <span>{a}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              ))}
-              {msg.result.plan && (
+              )}
+
+              {/* Discussion plan */}
+              {msg.result.plan && !msg.result.consensus && (
                 <div className="groupPlanCard">
                   <div className="groupPlanTitle"><List size={13} /> Discussion Plan</div>
                   {msg.result.plan.map((step, i) => (
@@ -1469,8 +1507,25 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
           {activeTab === 'group' && (
             <div className="chatContainer">
               <div className="groupConfig">
-                <label>Select Participants</label>
-                <TeamMultiSelect selected={groupParticipants} onChange={setGroupParticipants} />
+                <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: 180 }}>
+                    <label>Select Participants</label>
+                    <TeamMultiSelect selected={groupParticipants} onChange={setGroupParticipants} />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: 4 }}>Discussion Rounds</label>
+                    <div style={{ display: 'flex', gap: 4 }}>
+                      {[1, 2, 3].map(n => (
+                        <button key={n}
+                          className={`previewToggleBtn ${groupMaxTurns === n ? 'active' : ''}`}
+                          onClick={() => setGroupMaxTurns(n)}
+                          title={`${n} round${n > 1 ? 's' : ''} — each agent speaks ${n} time${n > 1 ? 's' : ''}`}>
+                          {n}×
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
               </div>
               <div className="messagesList">{groupHistory.map(renderMessage)}<div ref={messagesEndRef} /></div>
             </div>
