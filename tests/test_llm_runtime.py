@@ -1,4 +1,4 @@
-from factory.llm.runtime import TeamLLMRuntime
+from factory.llm.runtime import TeamLLMRuntime, _TEAM_PROMPTS
 
 
 def test_runtime_governance_has_available_models() -> None:
@@ -45,3 +45,10 @@ def test_runtime_clear_api_key() -> None:
     rt.update_team_config(team="backend_eng", api_key="")
     snap = rt.governance_snapshot()
     assert snap["teams"]["backend_eng"]["has_custom_key"] is False
+
+
+def test_solution_arch_prompt_requires_user_loop_questions() -> None:
+    prompt = _TEAM_PROMPTS["solution_arch"]
+    assert "OPEN QUESTIONS FOR USER" in prompt
+    assert "KNOWN INPUTS" in prompt
+    assert "ASSUMPTIONS" in prompt

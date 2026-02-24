@@ -1,4 +1,4 @@
-from factory.agents.phase2_handlers import extract_handoff_to, run_phase2_handler
+from factory.agents.phase2_handlers import _gen_solution_arch, extract_handoff_to, run_phase2_handler
 
 
 def test_phase2_handler_contains_handoff() -> None:
@@ -49,3 +49,48 @@ def test_handoff_ok_for_subset_of_teams() -> None:
         assert observed == expected, (
             f"{team}: expected handoff_to={expected!r} but got {observed!r}"
         )
+
+
+def test_solution_arch_generator_includes_clarity_questions() -> None:
+    llm = (
+        "KNOWN INPUTS:\n"
+        "- web MVP\n"
+        "ASSUMPTIONS:\n"
+        "- school-managed deployment\n"
+        "OPEN QUESTIONS FOR USER:\n"
+        "- Which locales are required at launch?\n"
+        "- Should analytics be opt-in by parent?\n"
+    )
+    gen = _gen_solution_arch("create a kids calculator", llm)
+    doc = gen.get("doc_content", "")
+    assert "Open Questions for User" in doc
+    assert "Requirement Clarity (User in Loop)" in doc
+    assert "- Which locales are required at launch?" in doc
+    assert "- Should analytics be opt-in by parent?" in doc
+
+
+def test_solution_arch_stage_artifact_surfaces_clarifying_questions() -> None:
+    stage = run_phase2_handler(team="solution_arch", requirement="kids calculator", prior_count=0)
+    # Without LLM-provided OPEN QUESTIONS section, no synthetic questions are added.
+    assert "clarifying_questions_count:" not in stage.artifact
+    assert "clarifying_questions:" not in stage.artifact
+
+
+def test_solution_arch_followup_with_user_clarifications_has_no_fallback_questions() -> None:
+    req = (
+        "Original Requirement:\nKids calculator\n\n"
+        "User Clarifications (answer to Sol Arch questions):\n"
+        "Web-first MVP, basic arithmetic only, COPPA controls enabled."
+    )
+    stage = run_phase2_handler(team="solution_arch", requirement=req, prior_count=0)
+    assert "clarifying_questions_count:" not in stage.artifact
+
+
+def test_solution_arch_generator_extracts_question_list_field() -> None:
+    llm = (
+        "OPEN QUESTIONS FOR USER:\n"
+        "- Q1?\n"
+        "- Q2?\n"
+    )
+    gen = _gen_solution_arch("r", llm)
+    assert gen.get("clarifying_questions") == ["Q1?", "Q2?"]

@@ -111,3 +111,31 @@ def test_full_run_async_task_tracking_endpoint() -> None:
     assert payload['status'] == 'completed'
     assert len(payload['activities']) == 17
     assert payload['result']['overall_handoff_ok'] is True
+
+
+def test_full_run_async_solution_arch_only_override() -> None:
+    start = client.post(
+        '/api/pipelines/full/run/async',
+        json={
+            'project_id': 'sa-only-1',
+            'requirement': 'create a kids calculator',
+            'teams': ['solution_arch'],
+        },
+    )
+    assert start.status_code == 200
+    task_id = start.json()['task_id']
+
+    payload = None
+    for _ in range(40):
+        status = client.get(f'/api/tasks/{task_id}')
+        assert status.status_code == 200
+        payload = status.json()
+        assert payload['status'] in {'running', 'completed', 'failed'}
+        if payload['status'] in {'completed', 'failed'}:
+            break
+        time.sleep(0.05)
+
+    assert payload is not None
+    assert payload['status'] == 'completed'
+    assert len(payload['activities']) == 1
+    assert payload['activities'][0]['team'] == 'solution_arch'

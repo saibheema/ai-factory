@@ -125,6 +125,18 @@ const formatTeamName = (key) => {
 const formatModelName = (k) => MODEL_FLAT[k]?.label || (k?.split('/')?.pop() ?? k)
 const getModelInfo = (k) => MODEL_FLAT[k] || { label: k, desc: '', color: '#94a3b8', keyRequired: false }
 
+function parseSolArchQuestionsFromArtifact(artifactText) {
+  if (!artifactText) return []
+  const marker = '- clarifying_questions:'
+  const idx = artifactText.indexOf(marker)
+  if (idx < 0) return []
+  const raw = artifactText.slice(idx + marker.length).trim()
+  return raw
+    .split(' || ')
+    .map(s => s.trim())
+    .filter(Boolean)
+}
+
 
 /* ═══════════════════════════════════════════════════════════
    SVG Memory Graph
@@ -951,6 +963,12 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
 
   /* Session credentials (in-memory keys shared in group chat) */
   const [sessionCredKeys, setSessionCredKeys] = useState([])
+  const [sessionCredCatalog, setSessionCredCatalog] = useState([])
+  const [sessionCredKeyInput, setSessionCredKeyInput] = useState('')
+  const [sessionCredValueInput, setSessionCredValueInput] = useState('')
+  const [showSessionCredValue, setShowSessionCredValue] = useState(false)
+  const [pendingSolArchQuestions, setPendingSolArchQuestions] = useState([])
+  const [solArchQuestionContext, setSolArchQuestionContext] = useState('')
 
   /* Clone Repo state */
   const [cloneUrl, setCloneUrl] = useState('')
@@ -967,6 +985,16 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
       .catch(() => setGitConfig(null))
     api('/api/user/git-token')
       .then(r => setUserGitTokenSet(r.token_set || false))
+      .catch(() => {})
+    api('/api/session/creds')
+      .then(r => setSessionCredKeys(r.keys || []))
+      .catch(() => {})
+    api('/api/session/creds/catalog')
+      .then(r => {
+        const keys = r.keys || []
+        setSessionCredCatalog(keys)
+        if (!sessionCredKeyInput && keys.length > 0) setSessionCredKeyInput(keys[0].key)
+      })
       .catch(() => {})
   }, [projectId])
 
@@ -1023,9 +1051,18 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   /* ─── Pipeline ─── */
   async function startPipeline(requirement) {
     const isFollowup = !!(taskStatus?.result?.code_files && Object.keys(taskStatus.result.code_files).length > 0)
+    const hasPendingSolArchQuestions = pendingSolArchQuestions.length > 0
+    const refinedReq = hasPendingSolArchQuestions
+      ? (
+          `Original Requirement:\n${solArchQuestionContext || 'N/A'}\n\n` +
+          `User Clarifications (answer to Sol Arch questions):\n${requirement}\n\n` +
+          `Instruction: Update architecture decisions using these clarifications and continue.`
+        )
+      : requirement
     const body = {
       project_id: projectId,
-      requirement,
+      requirement: refinedReq,
+      ...(hasPendingSolArchQuestions && { teams: ['solution_arch'] }),
       ...(isFollowup && {
         is_followup: true,
         existing_code: taskStatus.result.code_files,
@@ -1033,7 +1070,9 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
     }
     setPipelineHistory(prev => [...prev, {
       id: Date.now(), role: 'user',
-      text: isFollowup ? `✏️ Follow-up: ${requirement}` : requirement,
+      text: hasPendingSolArchQuestions
+        ? `✅ Sol Arch answers submitted: ${requirement}`
+        : (isFollowup ? `✏️ Follow-up: ${requirement}` : requirement),
     }])
     setCommsEvents([])  // clear previous comms when starting a new run
     const data = await handleApi(() => api('/api/pipelines/full/run/async', {
@@ -1065,11 +1104,23 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
           console.debug('Comms polling error:', commsErr)
         }
         if (data.status === 'completed') {
+          const solArchArtifact = data.result?.artifacts?.solution_arch || ''
+          const solQuestions = parseSolArchQuestionsFromArtifact(solArchArtifact)
+          if (solQuestions.length > 0) {
+            setPendingSolArchQuestions(solQuestions)
+            setSolArchQuestionContext(data.requirement || solArchQuestionContext)
+          } else {
+            setPendingSolArchQuestions([])
+          }
           setPipelineHistory(prev => [...prev, {
             id: Date.now(), role: 'assistant',
             text: `Pipeline completed! Artifacts stored: ${data.result?.storage?.type || 'cloud'}`,
             result: data.result,
-          }])
+          }, ...(solQuestions.length > 0 ? [{
+            id: Date.now() + 1,
+            role: 'assistant',
+            text: `Sol Arch clarification questions (answer here in pipeline chat):\n${solQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}`,
+          }] : [])])
           loadMemoryMap()
           clearInterval(timer); setTrackedTaskId('')
         }
@@ -1331,6 +1382,19 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   async function removeSessionCred(key) {
     try { await api(`/api/session/creds/${key}`, { method: 'DELETE' }) } catch (_) {}
     setSessionCredKeys(prev => prev.filter(k => k !== key))
+  }
+
+  async function saveSessionCredFromSettings() {
+    const key = (sessionCredKeyInput || '').trim().toUpperCase()
+    const value = (sessionCredValueInput || '').trim()
+    if (!key || !value) return
+    try {
+      await api('/api/session/creds', { method: 'POST', body: { key, value } })
+      setSessionCredKeys(prev => [...new Set([...prev, key])])
+      setSessionCredValueInput('')
+    } catch (e) {
+      setError(e.message)
+    }
   }
 
   const handleSubmit = e => {
@@ -2017,6 +2081,56 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                             {cloneResult.file_tree.length > 15 && <span className="repoFileTag">+{cloneResult.file_tree.length - 15} more</span>}
                           </div>
                         )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Team Edit Card */}
+                  <div className="card editCard">
+                    <div className="cardHeader"><Key size={18} /><h4>Tool Credentials (Session Only)</h4></div>
+                    <p className="fieldHint">Configure tool keys in UI. Stored in memory for this session only and never persisted.</p>
+                    <div className="fieldRow">
+                      <label>Credential Key</label>
+                      <select value={sessionCredKeyInput} onChange={e => setSessionCredKeyInput(e.target.value)}>
+                        {sessionCredCatalog.map(item => (
+                          <option key={item.key} value={item.key}>{item.key}</option>
+                        ))}
+                      </select>
+                      {sessionCredCatalog.find(k => k.key === sessionCredKeyInput)?.description && (
+                        <p className="fieldHint" style={{ marginTop: 6 }}>
+                          {sessionCredCatalog.find(k => k.key === sessionCredKeyInput)?.description}
+                          {sessionCredCatalog.find(k => k.key === sessionCredKeyInput)?.tools?.length > 0
+                            ? ` · tools: ${sessionCredCatalog.find(k => k.key === sessionCredKeyInput).tools.join(', ')}`
+                            : ''}
+                        </p>
+                      )}
+                    </div>
+                    <div className="fieldRow">
+                      <label>Credential Value</label>
+                      <div style={{ display: 'flex', gap: '6px' }}>
+                        <input
+                          type={showSessionCredValue ? 'text' : 'password'}
+                          value={sessionCredValueInput}
+                          onChange={e => setSessionCredValueInput(e.target.value)}
+                          placeholder="Paste secret value"
+                          style={{ flex: 1 }}
+                        />
+                        <button className="iconBtn" type="button" onClick={() => setShowSessionCredValue(v => !v)}>
+                          {showSessionCredValue ? <EyeOff size={14} /> : <Eye size={14} />}
+                        </button>
+                      </div>
+                    </div>
+                    <button className="primaryBtn" onClick={saveSessionCredFromSettings} disabled={!sessionCredKeyInput || !sessionCredValueInput.trim() || loading}>
+                      <Key size={14} /> Save Session Key
+                    </button>
+                    {sessionCredKeys.length > 0 && (
+                      <div style={{ marginTop: 10 }}>
+                        <p className="fieldHint" style={{ marginBottom: 6 }}>Active session keys:</p>
+                        <div className="sessionCredsBar" style={{ margin: 0 }}>
+                          {sessionCredKeys.map(k => (
+                            <span key={k} className="sessionCredTag">{k}<button onClick={() => removeSessionCred(k)} title="Remove">×</button></span>
+                          ))}
+                        </div>
                       </div>
                     )}
                   </div>

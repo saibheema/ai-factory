@@ -15,6 +15,7 @@ import logging
 import os
 import asyncio
 import json
+import re
 import threading
 import uuid
 from collections import defaultdict, deque
@@ -187,6 +188,9 @@ def _unblock_all_for_user(uid: str) -> int:
             ev.set()
             count += 1
     return count
+
+
+def _get_session_creds(uid: str) -> dict[str, str]:
     with _SESSION_CREDS_LOCK:
         return dict(_SESSION_CREDS.get(uid, {}))
 
@@ -210,6 +214,27 @@ _KNOWN_CRED_KEYS = {
     "GIT_TOKEN", "GITHUB_TOKEN",
     "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
     "PAGERDUTY_API_KEY", "DATADOG_API_KEY",
+}
+
+_CRED_CATALOG: dict[str, dict] = {
+    "PLANE_API_KEY": {"description": "Plane API key", "tools": ["plane"]},
+    "PLANE_WORKSPACE_SLUG": {"description": "Plane workspace slug", "tools": ["plane"]},
+    "SLACK_BOT_TOKEN": {"description": "Slack bot token", "tools": ["slack"]},
+    "CONFLUENCE_URL": {"description": "Confluence base URL", "tools": ["confluence"]},
+    "CONFLUENCE_USER": {"description": "Confluence user/email", "tools": ["confluence"]},
+    "CONFLUENCE_API_TOKEN": {"description": "Confluence API token", "tools": ["confluence"]},
+    "JIRA_URL": {"description": "Jira base URL", "tools": ["jira"]},
+    "JIRA_USER": {"description": "Jira user/email", "tools": ["jira"]},
+    "JIRA_API_TOKEN": {"description": "Jira API token", "tools": ["jira"]},
+    "TAVILY_API_KEY": {"description": "Tavily search API key", "tools": ["tavily_search"]},
+    "GOOGLE_SA_JSON": {"description": "Base64-encoded Google service account JSON", "tools": ["google_docs", "google_sheets"]},
+    "GIT_TOKEN": {"description": "Git provider token for pushes", "tools": ["git"]},
+    "GITHUB_TOKEN": {"description": "GitHub token alias", "tools": ["git"]},
+    "OPENAI_API_KEY": {"description": "OpenAI provider key", "tools": ["llm_provider"]},
+    "ANTHROPIC_API_KEY": {"description": "Anthropic provider key", "tools": ["llm_provider"]},
+    "GEMINI_API_KEY": {"description": "Google Gemini provider key", "tools": ["llm_provider"]},
+    "PAGERDUTY_API_KEY": {"description": "PagerDuty key for incidents", "tools": ["incident_notifier"]},
+    "DATADOG_API_KEY": {"description": "Datadog API key", "tools": ["observability"]},
 }
 
 # Regex to detect KEY=value patterns in chat messages
@@ -349,6 +374,7 @@ class RunRequest(BaseModel):
     requirement: str
     existing_code: dict | None = None   # {team: {filename: content}} from a prior run
     is_followup: bool = False
+    teams: list[str] | None = None      # optional explicit team subset
 
 
 class ClarificationCreateRequest(BaseModel):
@@ -450,6 +476,20 @@ _TEAM_KEYWORDS: dict[str, list[str]] = {
 # Always-on teams for any coding requirement
 _CORE_TEAMS = ["solution_arch", "backend_eng", "frontend_eng", "qa_eng", "devops"]
 
+
+def _normalize_requested_teams(requested: list[str] | None) -> list[str]:
+    """Return canonical-order, deduplicated teams limited to known team names."""
+    if not requested:
+        return []
+    all_teams = list(phase2_pipeline.teams)
+    selected: set[str] = set()
+    known = set(all_teams)
+    for team in requested:
+        t = (team or "").strip()
+        if t in known:
+            selected.add(t)
+    return [t for t in all_teams if t in selected]
+
 def _select_teams(requirement: str, llm_runtime=None) -> list[str]:
     """Return the ordered subset of teams needed for this requirement.
 
@@ -511,7 +551,25 @@ def _run_full_pipeline_tracked(
     Only runs the teams relevant to the requirement (smart routing).
     Persists progress to Firestore, artifacts to GCS or Git.
     """
-    teams = _select_teams(req.requirement, llm_runtime)
+    requested_teams = _normalize_requested_teams(req.teams)
+    teams = requested_teams if requested_teams else _select_teams(req.requirement, llm_runtime)
+    if req.teams is not None and not teams:
+        run_state = {
+            "task_id": task_id,
+            "project_id": req.project_id,
+            "requirement": req.requirement,
+            "uid": uid,
+            "mode": "full",
+            "status": "failed",
+            "current_team": None,
+            "started_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
+            "activities": [],
+            "result": None,
+            "error": "No valid teams provided. Use names from /api/pipelines/full/teams",
+        }
+        _task_store_save(task_id, run_state, uid, req.project_id)
+        return
     # Snapshot session creds at pipeline start (immutable for this run)
     _screds = _get_session_creds(uid)
     run_state = {
@@ -1031,6 +1089,23 @@ def list_session_creds(
     with _SESSION_CREDS_LOCK:
         keys = list(_SESSION_CREDS.get(user.uid, {}).keys())
     return {"keys": keys, "count": len(keys)}
+
+
+@app.get("/api/session/creds/catalog")
+def get_session_cred_catalog(
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Return known session credential keys and tool usage hints for UI forms."""
+    keys = sorted(_KNOWN_CRED_KEYS)
+    catalog = []
+    for key in keys:
+        meta = _CRED_CATALOG.get(key, {})
+        catalog.append({
+            "key": key,
+            "description": meta.get("description", "Session credential"),
+            "tools": meta.get("tools", []),
+        })
+    return {"keys": catalog, "count": len(catalog)}
 
 
 @app.delete("/api/session/creds/{key}")

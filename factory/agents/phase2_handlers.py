@@ -731,6 +731,43 @@ def _gen_solution_arch(requirement: str, llm_content: str) -> dict:
         f"### → Security Eng\n{handoff_sec or '(see Decisions section)'}"
     )
 
+    # ── Explicit user-clarification block (always include) ──────────────────
+    # Fully non-hardcoded: extract from LLM sections only.
+    # If sections are absent, we do not fabricate domain questions.
+    def _extract_section_list(header: str, text: str) -> list[str]:
+        m = _re.search(
+            rf"{header}:\s*(.+?)(?=\n[A-Z][A-Z_\s]+:|\nHANDOFF_|$)",
+            text,
+            _re.IGNORECASE | _re.DOTALL,
+        )
+        if not m:
+            return []
+        out: list[str] = []
+        for ln in m.group(1).splitlines():
+            cleaned = ln.strip().lstrip("-•").strip()
+            if cleaned and cleaned.lower() != "none":
+                out.append(cleaned)
+        return out
+
+    _open_questions: list[str] = []
+    _known_inputs = _extract_section_list("KNOWN INPUTS", llm_content)
+    _assumptions = _extract_section_list("ASSUMPTIONS", llm_content)
+    _open_questions = _extract_section_list("OPEN QUESTIONS FOR USER", llm_content)
+    if not _known_inputs:
+        _known_inputs = [f"Requirement text: {requirement[:220]}"]
+    if not _assumptions:
+        _assumptions = ["Not explicitly provided by model."]
+
+    _clarity_block = (
+        "\n\n## Requirement Clarity (User in Loop)\n"
+        "### Known Inputs\n"
+        + "\n".join(f"- {x}" for x in _known_inputs)
+        + "\n\n### Assumptions\n"
+        + "\n".join(f"- {x}" for x in _assumptions)
+        + "\n\n### Open Questions for User\n"
+        + ("\n".join(f"- {q}" for q in _open_questions) if _open_questions else "- None")
+    )
+
     return {
         "doc_title": "ADR-001 — Architecture Decision Record",
         "doc_content": (
@@ -738,6 +775,7 @@ def _gen_solution_arch(requirement: str, llm_content: str) -> dict:
             f"## Context\n{requirement}\n\n"
             f"{llm_content}\n"
             f"{handoff_section}\n\n"
+            f"{_clarity_block}\n\n"
             f"## Consequences\n"
             f"- Positive: Aligned stack, clear ownership, traceable decisions\n"
             f"- Negative: Initial ramp-up; teams must read this ADR before starting"
@@ -745,6 +783,9 @@ def _gen_solution_arch(requirement: str, llm_content: str) -> dict:
         # Multiple Tavily research queries — executed sequentially
         "search_queries": [
             f"best UI framework 2025 React Next.js Vue SvelteKit comparison {requirement[:40]}",
+            f"latest 2025 UI design patterns for kids apps accessibility gamification {requirement[:35]}",
+            f"github open source kids learning calculator app React Next.js examples",
+            f"best open source education app frontend architecture GitHub",
             f"FastAPI vs NestJS vs Django REST performance comparison 2025",
             f"Cloud Run vs GKE vs ECS Fargate cost performance 2025",
             f"microservices vs monolith architecture {requirement[:40]} best practices",
@@ -782,6 +823,7 @@ def _gen_solution_arch(requirement: str, llm_content: str) -> dict:
             "devops":        handoff_devop or "Deploy using the cloud target and IaC tool defined in the ADR.",
             "security_eng":  handoff_sec   or "Apply the auth mechanism and OWASP priorities defined in the ADR.",
         },
+        "clarifying_questions": _open_questions,
     }
 
 
@@ -1379,6 +1421,16 @@ def _run_phase2_handler_body(
         f"- a2a_messages_sent: {len(a2a_dispatched)}\n"
         f"- handoff_to: {handoff}"
     )
+
+    # Surface Sol Arch clarifying questions in the artifact so the pipeline chat
+    # can show them immediately without requiring group chat navigation.
+    if team == "solution_arch":
+        _qs: list[str] = gen_data.get("clarifying_questions", [])  # type: ignore[assignment]
+        if _qs:
+            artifact += (
+                f"\n- clarifying_questions_count: {len(_qs)}"
+                f"\n- clarifying_questions: {' || '.join(_qs)}"
+            )
 
     # ── Decision metadata ──────────────────────────────────────────────────
     decision_type = _DECISION_TYPES.get(team, "architecture")
