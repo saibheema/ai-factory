@@ -1549,10 +1549,15 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
         )}
 
         {/* Live pipeline indicator */}
-        {taskStatus?.status === 'running' && (
-          <div className="sidebarActivity">
-            <div className="sidebarActivityHeader"><Loader2 size={13} className="spin" /><span>Pipeline Running</span></div>
-            <div className="sidebarActivityTeam"><Zap size={12} /> {formatTeamName(taskStatus.current_team)}</div>
+        {(taskStatus?.status === 'running' || taskStatus?.status === 'blocked') && (
+          <div className={`sidebarActivity${taskStatus.status === 'blocked' ? ' sidebarActivityBlocked' : ''}`}>
+            <div className="sidebarActivityHeader">
+              {taskStatus.status === 'blocked'
+                ? <><AlertTriangle size={13} style={{ color: '#f59e0b' }} /><span style={{ color: '#f59e0b' }}>Pipeline Blocked</span></>
+                : <><Loader2 size={13} className="spin" /><span>Pipeline Running</span></>
+              }
+            </div>
+            <div className="sidebarActivityTeam"><Zap size={12} /> {formatTeamName(taskStatus.blocked_on?.team || taskStatus.current_team)}</div>
             <div className="sidebarActivityBar">
               <div className="sidebarActivityFill" style={{ width: `${taskStatus.activities?.length ? Math.round(taskStatus.activities.filter(a => a.status === 'complete').length / taskStatus.activities.length * 100) : 0}%` }} />
             </div>
@@ -1593,6 +1598,29 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
                   <button className="previewBannerBtn" onClick={() => setActiveTab('preview')}>
                     <Monitor size={13} /> View Live Preview →
                   </button>
+                </div>
+              )}
+              {taskStatus?.status === 'blocked' && (
+                <div className="blockedBanner">
+                  <div className="blockedBannerTitle">
+                    <AlertTriangle size={16} />
+                    Pipeline Blocked — {formatTeamName(taskStatus.blocked_on?.team)} needs your input
+                  </div>
+                  <div className="blockedBannerTool">
+                    🔧 Tool: <strong>{taskStatus.blocked_on?.tool}</strong>
+                    {taskStatus.blocked_on?.autofix_attempted && <span className="autofixNote"> · auto-fix was attempted</span>}
+                  </div>
+                  <div className="blockedBannerReason">{taskStatus.blocked_on?.reason}</div>
+                  <div className="blockedBannerActions">
+                    <button className="previewBannerBtn" style={{ background: '#f59e0b', color: '#1c1917' }}
+                      onClick={() => setActiveTab('group')}>
+                      <MessageSquare size={13} /> Reply in Group Chat →
+                    </button>
+                    <button className="previewBannerBtn" style={{ background: '#7c3aed' }}
+                      onClick={() => setActiveTab('comms')}>
+                      <Radio size={13} /> View Recovery Details →
+                    </button>
+                  </div>
                 </div>
               )}
               <div className="pipelineLayout">

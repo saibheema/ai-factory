@@ -933,6 +933,27 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 }
 .recoveryCardHint code { background: #fde68a; padding: 1px 4px; border-radius: 3px; font-size: 11px; }
 
+/* ── Pipeline Blocked Banner ─────────────────────────────── */
+.blockedBanner {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 14px 20px; background: #1c1917;
+  border-bottom: 2px solid #f59e0b; flex-shrink: 0;
+}
+.blockedBannerTitle {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 14px; font-weight: 700; color: #fbbf24;
+}
+.blockedBannerTool { font-size: 12px; color: #a8a29e; }
+.blockedBannerTool strong { color: #e7e5e4; }
+.autofixNote { font-style: italic; color: #78716c; }
+.blockedBannerReason {
+  font-size: 13px; color: #d6d3d1; line-height: 1.55;
+  background: #292524; padding: 9px 13px; border-radius: 6px;
+  border-left: 3px solid #f59e0b;
+}
+.blockedBannerActions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+.sidebarActivityBlocked .sidebarActivityFill { background: #f59e0b !important; }
+
 /* ── Session Creds Bar ────────────────────────────────── */
 .sessionCredsBar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;

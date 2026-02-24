@@ -157,8 +157,36 @@ _heal_history_lock = threading.Lock()
 _SESSION_CREDS: dict[str, dict[str, str]] = {}
 _SESSION_CREDS_LOCK = threading.Lock()
 
+# ─── Pipeline block events — one threading.Event per blocked task ─────────────────
+# When a team fails a hard-block tool, the pipeline parks on an Event, waiting
+# for the user to supply credentials via group chat or /api/session/creds.
+_PIPELINE_BLOCK_EVENTS: dict[str, threading.Event] = {}
+_USER_BLOCKED_TASKS: dict[str, set] = defaultdict(set)
+_PIPELINE_BLOCK_LOCK = threading.Lock()
 
-def _get_session_creds(uid: str) -> dict[str, str]:
+
+def _register_block(task_id: str, uid: str) -> threading.Event:
+    """Register a pipeline block and return the Event to wait on."""
+    ev = threading.Event()
+    with _PIPELINE_BLOCK_LOCK:
+        _PIPELINE_BLOCK_EVENTS[task_id] = ev
+        _USER_BLOCKED_TASKS[uid].add(task_id)
+    return ev
+
+
+def _unblock_all_for_user(uid: str) -> int:
+    """Signal all pipelines blocked for *uid* to resume. Returns count unblocked."""
+    with _PIPELINE_BLOCK_LOCK:
+        task_ids = list(_USER_BLOCKED_TASKS.get(uid, set()))
+    count = 0
+    for tid in task_ids:
+        with _PIPELINE_BLOCK_LOCK:
+            ev = _PIPELINE_BLOCK_EVENTS.pop(tid, None)
+            _USER_BLOCKED_TASKS.get(uid, set()).discard(tid)
+        if ev:
+            ev.set()
+            count += 1
+    return count
     with _SESSION_CREDS_LOCK:
         return dict(_SESSION_CREDS.get(uid, {}))
 
@@ -593,18 +621,95 @@ def _run_full_pipeline_tracked(
                 session_creds=_screds or None,
             )
 
-            # ── Recovery: scan for failed tools and post questions to group chat ────
-            _failed_tools = [te for te in getattr(stage, "tools_used", []) if not te.success]
-            for _failed in _failed_tools:
-                _recovery_q = get_tool_recovery_question(_failed.tool, _failed.error or "")
-                if _recovery_q:
+            # ── Hard-block: pause pipeline, wait for user input, then retry once ────
+            if stage.blocked:
+                _recovery_q = stage.block_reason or get_tool_recovery_question(stage.block_tool, "") or ""
+                _push_comms(
+                    task_id, team, "user", "recovery_needed",
+                    f"⚠️ {team.replace('_', ' ').title()} is blocked on '{stage.block_tool}'. "
+                    f"{_recovery_q}"
+                )
+                with task_runs_lock:
+                    st = task_runs[task_id]
+                    st["status"] = "blocked"
+                    st["blocked_on"] = {
+                        "team": team,
+                        "tool": stage.block_tool,
+                        "reason": _recovery_q,
+                        "autofix_attempted": stage.autofix_applied,
+                    }
+                    st["activities"][idx]["status"] = "blocked"
+                    st["updated_at"] = datetime.now(UTC).isoformat()
+                _task_store_save(task_id, run_state, uid, req.project_id)
+                log.info(
+                    "Pipeline BLOCKED at %s.%s — waiting for user input (30-min timeout)",
+                    team, stage.block_tool,
+                )
+
+                _ev = _register_block(task_id, uid)
+                _unblocked = _ev.wait(timeout=1800)  # wait up to 30 minutes
+
+                if not _unblocked:
                     _push_comms(
-                        task_id, team, "user",
-                        "recovery_needed",
-                        f"⚠️ {team.replace('_', ' ').title()} — {_failed.tool} failed. "
-                        f"{_recovery_q}",
+                        task_id, "orchestrator", "user", "status",
+                        f"⏱ Pipeline timed out after 30 min waiting for '{stage.block_tool}' credentials. "
+                        "Re-run after providing the required credentials.",
                     )
-                    log.info("Recovery question posted for %s tool=%s", team, _failed.tool)
+                    with task_runs_lock:
+                        run_state["status"] = "failed"
+                        run_state["error"] = f"Timed out waiting for '{stage.block_tool}' credentials"
+                        run_state["updated_at"] = datetime.now(UTC).isoformat()
+                        task_runs[task_id].update(run_state)
+                    _task_store_save(task_id, run_state, uid, req.project_id)
+                    return  # abort pipeline
+
+                # User provided input — refresh creds and retry this team once
+                _screds = _get_session_creds(uid)
+                _push_comms(task_id, team, team, "status",
+                            f"✅ Unblocked! Retrying {team} with updated credentials…")
+                with task_runs_lock:
+                    st = task_runs[task_id]
+                    st["status"] = "running"
+                    st.pop("blocked_on", None)
+                    st["activities"][idx]["status"] = "in_progress"
+                    st["updated_at"] = datetime.now(UTC).isoformat()
+                _task_store_save(task_id, run_state, uid, req.project_id)
+
+                stage = run_phase2_handler(
+                    team=team, requirement=effective_req,
+                    prior_count=len(prior), llm_runtime=llm_runtime,
+                    uid=uid, project_id=req.project_id,
+                    git_url=_git_url, git_token=_git_token,
+                    folder_id=_folder_id, all_code=flat_code or None,
+                    shared_knowledge="\n\n".join(shared_knowledge_parts),
+                    next_team=teams[idx + 1] if idx + 1 < len(teams) else "none",
+                    session_creds=_screds or None,
+                )
+
+                if stage.blocked:
+                    # Still failing after retry — surface the message and continue
+                    # rather than blocking indefinitely a second time.
+                    _push_comms(
+                        task_id, team, "user", "recovery_needed",
+                        f"⚠️ {team} still blocked on '{stage.block_tool}' after retry. "
+                        f"{stage.block_reason} — continuing with partial output.",
+                    )
+                    log.warning(
+                        "Team %s still blocked on %s after retry, proceeding with partial stage",
+                        team, stage.block_tool,
+                    )
+
+            else:
+                # ── Soft recovery: surface non-blocking failures without halting ──
+                _failed_soft = [te for te in getattr(stage, "tools_used", []) if not te.success]
+                for _failed in _failed_soft:
+                    _recovery_q = get_tool_recovery_question(_failed.tool, _failed.error or "")
+                    if _recovery_q:
+                        _push_comms(
+                            task_id, team, "user", "recovery_needed",
+                            f"⚠️ {team.replace('_', ' ').title()} — {_failed.tool} failed. {_recovery_q}",
+                        )
+                        log.info("Soft recovery posted for %s tool=%s", team, _failed.tool)
 
             artifacts[team] = stage.artifact
             # Collect code files for preview and git push — MERGE with prior, don't replace
@@ -850,6 +955,7 @@ def store_session_cred(
     for this user, then restored. Values are discarded on server restart.
     """
     _set_session_cred(user.uid, body.key.upper(), body.value)
+    _unblock_all_for_user(user.uid)  # resume any blocked pipelines for this user
     return {"status": "stored", "key": body.key.upper(),
             "note": "Active for this session only — never persisted."}
 
@@ -1671,6 +1777,11 @@ def project_group_chat(
     detected_creds = _parse_creds_from_message(body.topic)
     for _ckey, _cval in detected_creds.items():
         _set_session_cred(user.uid, _ckey, _cval)
+    # Unblock any pipelines waiting for credentials from this user
+    if detected_creds:
+        _n = _unblock_all_for_user(user.uid)
+        if _n:
+            log.info("Group chat message unblocked %d pipeline(s) for uid=%s", _n, user.uid[:8])
 
     # ── @mention routing: if topic contains @tags, only those teams respond ──
     mentioned = _parse_mentions(body.topic)

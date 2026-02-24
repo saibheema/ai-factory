@@ -57,10 +57,162 @@ def get_tool_recovery_question(tool: str, error: str = "") -> str | None:
     q = _TOOL_RECOVERY_QUESTIONS.get(tool)
     if q:
         return q
-    # Generic fallback for unexpected errors
     if error:
         return f"Tool '{tool}' failed: {error[:120]}. Check configuration or share the required credentials in group chat."
     return None
+
+
+# ─── Tool failure classification ─────────────────────────────────────────────
+# LLM can regenerate code to fix these violations automatically.
+_AUTOFIX_TOOLS: frozenset[str] = frozenset({"ruff", "black", "mypy", "bandit"})
+
+# These MUST succeed — pipeline blocks (pauses for user input) if still failing
+# after any auto-fix attempt. Code quality + code storage are hard gates.
+_HARD_BLOCK_TOOLS: frozenset[str] = frozenset({
+    "ruff", "black", "mypy", "bandit",  # code quality gates
+    "git",                               # code must be persisted
+})
+
+
+def _try_autofix_code_quality(
+    tool: str,
+    te: "ToolExecution",
+    code_files: dict[str, str],
+    llm_runtime: "TeamLLMRuntime",
+    requirement: str,
+) -> "dict[str, str] | None":
+    """Use the LLM to auto-fix code quality violations.
+
+    Calls the LiteLLM proxy (or SDK fallback) with the violation details and
+    the current code, asking it to fix the specific issues.
+    Returns an updated *code_files* dict on success, or None if it cannot help.
+    """
+    try:
+        import httpx as _httpx
+
+        target_files = {k: v for k, v in code_files.items() if k.endswith(".py")}
+        if not target_files:
+            return None
+
+        # Build a concise violation summary
+        violations = ""
+        if tool == "ruff":
+            viols = (te.result or {}).get("violations", [])[:15]
+            violations = "\n".join(
+                f"  line {v.get('line', '?')}: [{v.get('code', '')}] {v.get('message', '')}"
+                for v in viols
+            )
+        elif tool == "black":
+            violations = ((te.result or {}).get("diff") or te.error or "needs formatting")[:400]
+        elif tool == "mypy":
+            errs = (te.result or {}).get("errors", [])[:10]
+            violations = "\n".join(f"  {e}" for e in errs) if errs else (te.error or "")[:300]
+        elif tool == "bandit":
+            issues = (te.result or {}).get("issues", [])[:10]
+            violations = "\n".join(
+                f"  [{i.get('issue_severity','?')}] {i.get('issue_text','')} ({i.get('filename','')})"
+                for i in issues
+            )
+
+        fix_instructions = {
+            "ruff": (
+                "Fix ALL ruff violations: unused imports (F401), line length (E501), "
+                "naming (N8xx), missing blank lines (E302), trailing whitespace (W291). "
+                "Preserve ALL logic exactly — only fix style."
+            ),
+            "black": (
+                "Reformat to Black style: max 88 chars per line, double quotes, "
+                "consistent indentation. Preserve ALL logic."
+            ),
+            "mypy": (
+                "Fix ALL mypy type errors: add type annotations, fix incompatible types, "
+                "use Optional[X] for nullable. Preserve ALL logic."
+            ),
+            "bandit": (
+                "Fix ALL Bandit security issues: replace hardcoded secrets with env vars, "
+                "use secrets.token_hex for random, use list args for subprocess. "
+                "Preserve ALL logic."
+            ),
+        }.get(tool, f"Fix all {tool} violations. Preserve ALL logic.")
+
+        code_str = "\n\n".join(
+            f"# === {fname} ===\n{code}" for fname, code in target_files.items()
+        )
+        prompt = (
+            f"You are a {tool} code fixer. Fix ONLY the quality violations — do NOT change logic.\n\n"
+            f"VIOLATIONS:\n{violations or te.error or 'see tool output'}\n\n"
+            f"CODE:\n{code_str[:4000]}\n\n"
+            f"INSTRUCTION: {fix_instructions}\n\n"
+            f"Return ONLY fixed code. For each file use this exact format:\n"
+            f"# === filename ===\n<complete fixed file content>\n\n"
+            f"NO markdown fences. NO explanations. Just the fixed code."
+        )
+        payload = {
+            "model": "factory/coder",
+            "messages": [
+                {"role": "system", "content": "You are a code quality fixer. Return only fixed code."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 3000,
+        }
+
+        fixed_text: str | None = None
+        try:
+            with _httpx.Client(timeout=30.0) as _c:
+                _r = _c.post(f"{llm_runtime.proxy_url}/chat/completions", json=payload)
+                _r.raise_for_status()
+                fixed_text = (_r.json()["choices"][0]["message"]["content"] or "").strip() or None
+        except Exception as _e1:
+            log.debug("Auto-fix proxy call failed (%s): %s", tool, _e1)
+
+        if not fixed_text:
+            try:
+                import litellm as _ll  # type: ignore[import]
+                _sdk = _ll.completion(**payload)
+                fixed_text = (_sdk.choices[0].message.content or "").strip() or None
+            except Exception as _e2:
+                log.debug("Auto-fix SDK call failed (%s): %s", tool, _e2)
+
+        if not fixed_text:
+            return None
+
+        # Parse "# === fname ===" blocks back into a dict
+        fixed_files: dict[str, str] = {}
+        cur_file: str | None = None
+        cur_lines: list[str] = []
+        for line in fixed_text.split("\n"):
+            if line.startswith("# === ") and line.endswith(" ==="):
+                if cur_file is not None:
+                    fixed_files[cur_file] = "\n".join(cur_lines).strip()
+                cur_file = line[6:-4]
+                cur_lines = []
+            else:
+                if cur_file is not None:
+                    cur_lines.append(line)
+        if cur_file is not None:
+            fixed_files[cur_file] = "\n".join(cur_lines).strip()
+
+        # Fallback: if no file-header format, map entire output to first file
+        if not fixed_files:
+            first_fname = next(iter(target_files.keys()))
+            fixed_files[first_fname] = _strip_fences(fixed_text)
+
+        # Merge fixed files back into original code_files
+        result = dict(code_files)
+        for fname, fixed_code in fixed_files.items():
+            if fname in result:
+                result[fname] = fixed_code
+            else:
+                for orig in list(result):
+                    if orig.endswith(fname) or fname.endswith(orig.split("/")[-1]):
+                        result[orig] = fixed_code
+                        break
+        return result
+
+    except Exception as _outer:
+        log.warning("Auto-fix outer error (%s): %s", tool, _outer)
+        return None
 
 
 def _strip_fences(code: str) -> str:
@@ -93,6 +245,11 @@ class Phase2StageArtifact:
     decision_type: str = ""       # e.g. "ADR", "threat_model", "acceptance_criteria"
     decision_title: str = ""      # short title for the decision card
     decision_rationale: str = ""  # extracted reasoning / action taken
+    # ── Recovery / blocking ──────────────────────────────────────────────────
+    blocked: bool = False          # True → pipeline must pause for user input
+    block_reason: str = ""         # Human-readable description of what's needed
+    block_tool: str = ""           # Which tool triggered the block
+    autofix_applied: bool = False  # True if LLM auto-fix was applied successfully
 
 
 def extract_handoff_to(artifact: str) -> str:
@@ -1033,6 +1190,10 @@ def _run_phase2_handler_body(
 
     # 4. Execute tools
     tools_used: list[ToolExecution] = []
+    # Blocking state — set by any hard-block tool failure
+    _block_tool = ""
+    _block_reason = ""
+    _autofix_applied = False
 
     # Tavily search (single query or multiple research queries for deep-research teams)
     if tool_cfg and "tavily_search" in tool_cfg.tools:
@@ -1066,7 +1227,11 @@ def _run_phase2_handler_body(
     code_files = gen_data.get("code_files", {})
     if code_files:
         if git_url:
-            tools_used.append(_execute_git(team, git_url, git_token, project_id, code_files))
+            _te_git = _execute_git(team, git_url, git_token, project_id, code_files)
+            if not _te_git.success and not _block_tool:
+                _block_tool = "git"
+                _block_reason = get_tool_recovery_question("git", _te_git.error or "") or ""
+            tools_used.append(_te_git)
         elif uid and project_id:
             for fname, fcontent in code_files.items():
                 tools_used.append(_execute_gcs(team, uid, project_id, fname.replace("/", "_"), fcontent))
@@ -1080,20 +1245,39 @@ def _run_phase2_handler_body(
     if tool_cfg and "trivy" in tool_cfg.tools and code_files:
         tools_used.append(_execute_trivy_iac(team, code_files))
 
-    if tool_cfg and "ruff" in tool_cfg.tools and code_files:
-        tools_used.append(_execute_ruff(team, code_files))
-
-    # ── Black formatting check ────────────────────────────────────────────────
-    if tool_cfg and "black" in tool_cfg.tools and code_files:
-        tools_used.append(_execute_black(team, code_files))
-
-    # ── mypy type check ───────────────────────────────────────────────────────
-    if tool_cfg and "mypy" in tool_cfg.tools and code_files:
-        tools_used.append(_execute_mypy(team, code_files))
-
-    # ── Bandit SAST ───────────────────────────────────────────────────────────
-    if tool_cfg and "bandit" in tool_cfg.tools and code_files:
-        tools_used.append(_execute_bandit(team, code_files))
+    # ── Code quality tools with LLM auto-fix ────────────────────────────────
+    # For each gate: run → if fail → try LLM fix → re-run → if still fail → block.
+    for _cq_name, _cq_fn in [
+        ("ruff",   _execute_ruff   if (tool_cfg and "ruff"   in tool_cfg.tools and code_files) else None),
+        ("black",  _execute_black  if (tool_cfg and "black"  in tool_cfg.tools and code_files) else None),
+        ("mypy",   _execute_mypy   if (tool_cfg and "mypy"   in tool_cfg.tools and code_files) else None),
+        ("bandit", _execute_bandit if (tool_cfg and "bandit" in tool_cfg.tools and code_files) else None),
+    ]:
+        if _cq_fn is None:
+            continue
+        _te = _cq_fn(team, code_files)
+        if not _te.success and llm_runtime is not None:
+            _vcount = (_te.result or {}).get("violation_count") or (_te.result or {}).get("error_count") or "?"
+            log.info("%s › %s failed (%s violations) — attempting LLM auto-fix", team, _cq_name, _vcount)
+            _fixed = _try_autofix_code_quality(_cq_name, _te, code_files, llm_runtime, requirement)
+            if _fixed is not None:
+                _te2 = _cq_fn(team, _fixed)
+                if _te2.success:
+                    code_files = _fixed           # propagate fixed code to all subsequent tools
+                    _autofix_applied = True
+                    _te2.action = f"✓ auto-fixed → {_te2.action}"
+                    tools_used.append(_te2)
+                    log.info("%s › %s: LLM auto-fix SUCCEEDED", team, _cq_name)
+                    continue
+                _te = _te2
+                _te.action += " [auto-fix attempted, violations remain]"
+                log.warning("%s › %s: LLM auto-fix FAILED — violations remain", team, _cq_name)
+            else:
+                _te.action += " [auto-fix unavailable — no LLM proxy response]"
+        if not _te.success and not _block_tool:
+            _block_tool = _cq_name
+            _block_reason = get_tool_recovery_question(_cq_name, _te.error or "") or ""
+        tools_used.append(_te)
 
     # ── Gitleaks secret scan ──────────────────────────────────────────────────
     if tool_cfg and "gitleaks" in tool_cfg.tools and code_files:
@@ -1187,4 +1371,8 @@ def _run_phase2_handler_body(
         decision_type=decision_type,
         decision_title=decision_title,
         decision_rationale=decision_rationale,
+        blocked=bool(_block_tool),
+        block_tool=_block_tool,
+        block_reason=_block_reason,
+        autofix_applied=_autofix_applied,
     )
