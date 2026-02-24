@@ -1301,15 +1301,31 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
   /* ─── Group Chat ─── */
   async function runGroupChat(topic) {
     setGroupHistory(prev => [...prev, { id: Date.now(), role: 'user', text: topic }])
-    const data = await handleApi(() => api(`/api/projects/${projectId}/group-chat`, {
-      method: 'POST', body: JSON.stringify({ topic, participants: groupParticipants, max_turns: groupMaxTurns }),
-    }))
-    if (data) {
-      setGroupHistory(prev => [...prev, { id: Date.now(), role: 'assistant', text: 'Group chat completed.', result: data }])
-      if (data.detected_creds?.length > 0) {
-        setSessionCredKeys(prev => [...new Set([...prev, ...data.detected_creds])])
+    // Use a 55 s AbortController so the browser doesn't hang for a full Cloud Run timeout
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 55000)
+    try {
+      const data = await handleApi(() => api(`/api/projects/${projectId}/group-chat`, {
+        method: 'POST',
+        body: JSON.stringify({ topic, participants: groupParticipants, max_turns: Math.min(groupMaxTurns, 2) }),
+        signal: ctrl.signal,
+      }))
+      clearTimeout(timer)
+      if (data) {
+        setGroupHistory(prev => [...prev, { id: Date.now(), role: 'assistant', text: 'Group discussion complete.', result: data }])
+        if (data.detected_creds?.length > 0) {
+          setSessionCredKeys(prev => [...new Set([...prev, ...data.detected_creds])])
+        }
+      } else {
+        setGroupHistory(prev => [...prev, { id: Date.now(), role: 'assistant', text: 'Could not complete group chat — teams are still being initialised.' }])
       }
-    } else setGroupHistory(prev => [...prev, { id: Date.now(), role: 'assistant', text: 'Error occurred.' }])
+    } catch (e) {
+      clearTimeout(timer)
+      const msg = e?.name === 'AbortError'
+        ? 'Group chat timed out (>55 s). Try @mentioning a specific team for a faster response.'
+        : (e?.message || 'Request failed')
+      setGroupHistory(prev => [...prev, { id: Date.now(), role: 'assistant', text: msg }])
+    }
   }
 
   async function removeSessionCred(key) {
@@ -1337,32 +1353,40 @@ function Workspace({ user, projectId, onChangeProject, onLogout }) {
             <div className="groupDiscussion">
               {/* Agent turns — grouped by round if multi-turn */}
               {(() => {
-                const turns = msg.result.discussion
-                const isMultiRound = turns.some(d => d.round > 1)
-                let lastRound = 0
-                return turns.map((d, i) => {
-                  const roundHeader = isMultiRound && d.round !== lastRound
-                    ? (lastRound = d.round, <div key={`r${d.round}`} className="groupRoundLabel">Round {d.round}</div>)
-                    : null
-                  const wasTagged = msg.result.tagged_teams?.includes(d.team)
-                  return (
-                    <React.Fragment key={i}>
-                      {roundHeader}
-                      <div className={`groupDiscussionCard ${wasTagged ? 'groupCardTagged' : ''}`}>
-                        <div className="groupDiscussionTeam">
-                          <Users size={13} />
-                          <strong>{formatTeamName(d.team)}</strong>
-                          {wasTagged && <span className="groupTaggedBadge">@ mentioned</span>}
-                          {d.source && d.source !== 'fallback' && (
-                            <span className="groupSourceBadge">{d.source.split(':')[0]}</span>
-                          )}
+                try {
+                  const turns = msg.result.discussion
+                  const isMultiRound = turns.some(d => d.round > 1)
+                  let lastRound = 0
+                  return turns.map((d, i) => {
+                    const roundHeader = isMultiRound && d.round !== lastRound
+                      ? (lastRound = d.round, <div key={`r${d.round}`} className="groupRoundLabel">Round {d.round}</div>)
+                      : null
+                    const wasTagged = msg.result.tagged_teams?.includes(d.team)
+                    const rawMsg = d.message || d.summary || ''
+                    const isLong = rawMsg.length > 500
+                    return (
+                      <React.Fragment key={i}>
+                        {roundHeader}
+                        <div className={`groupDiscussionCard ${wasTagged ? 'groupCardTagged' : ''}`}>
+                          <div className="groupDiscussionTeam">
+                            <Users size={13} />
+                            <strong>{formatTeamName(d.team)}</strong>
+                            {wasTagged && <span className="groupTaggedBadge">@ mentioned</span>}
+                            {d.source && d.source !== 'fallback' && (
+                              <span className="groupSourceBadge">{d.source.split(':')[0]}</span>
+                            )}
+                          </div>
+                          <div className="groupDiscussionText">
+                            {isLong ? rawMsg.slice(0, 500) + '…' : rawMsg}
+                          </div>
                         </div>
-                        <div className="groupDiscussionText">{d.message || d.summary}</div>
-                      </div>
-                    </React.Fragment>
-                  )
-                })
-              })()}
+                      </React.Fragment>
+                    )
+                  })
+                } catch (_renderErr) {
+                  return <div className="groupDiscussionCard">Discussion unavailable.</div>
+                }
+              })()}}
 
               {/* Consensus block */}
               {msg.result.consensus && (

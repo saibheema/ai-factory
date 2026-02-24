@@ -250,6 +250,12 @@ class Phase2StageArtifact:
     block_reason: str = ""         # Human-readable description of what's needed
     block_tool: str = ""           # Which tool triggered the block
     autofix_applied: bool = False  # True if LLM auto-fix was applied successfully
+    # ── Sol Arch per-team handoffs ───────────────────────────────────────────
+    # Populated only for solution_arch. Maps downstream team slug →
+    # team-specific instruction extracted from the HANDOFF_* LLM sections.
+    # The pipeline loop passes the relevant entry to each downstream team so
+    # every team receives tailored instructions rather than the same broadcast.
+    sol_arch_handoffs: dict[str, str] = field(default_factory=dict)
 
 
 def extract_handoff_to(artifact: str) -> str:
@@ -764,6 +770,18 @@ def _gen_solution_arch(requirement: str, llm_content: str) -> dict:
             "    API --> OBS[Observability — OTEL + Prometheus]\n"
             "    Worker --> DB"
         ),
+        # ── Per-team specific handoffs (extracted from LLM HANDOFF_* sections) ──
+        # These are passed individually to each downstream team so every team
+        # receives targeted instructions rather than the generic shared ADR text.
+        "handoff_data": {
+            "api_design":    handoff_api   or "Follow the API protocol and auth scheme in the ADR above.",
+            "ux_ui":         handoff_ux    or "Use the UI framework and component library chosen in the ADR.",
+            "frontend_eng":  handoff_fe    or "Implement using the UI stack defined in the ADR.",
+            "backend_eng":   handoff_be    or "Implement using the backend framework defined in the ADR.",
+            "database_eng":  handoff_db    or "Use the database engine and migration tool defined in the ADR.",
+            "devops":        handoff_devop or "Deploy using the cloud target and IaC tool defined in the ADR.",
+            "security_eng":  handoff_sec   or "Apply the auth mechanism and OWASP priorities defined in the ADR.",
+        },
     }
 
 
@@ -1075,6 +1093,7 @@ def run_phase2_handler(
     shared_knowledge: str = "",   # key decisions from upstream teams
     next_team: str = "",           # actual next team in THIS run's selected list
     session_creds: dict[str, str] | None = None,  # user-provided keys for this session
+    sol_arch_handoff: str = "",   # team-specific instruction from Sol Arch (if available)
 ) -> Phase2StageArtifact:
     """Execute a Phase 2 stage for one team with real tool invocations."""
     # ── Temporarily inject session-supplied credentials into os.environ ────────
@@ -1092,6 +1111,7 @@ def run_phase2_handler(
             llm_runtime=llm_runtime, uid=uid, project_id=project_id,
             git_url=git_url, git_token=git_token, folder_id=folder_id,
             all_code=all_code, shared_knowledge=shared_knowledge, next_team=next_team,
+            sol_arch_handoff=sol_arch_handoff,
         )
     finally:
         for _k, _orig in _env_backup.items():
@@ -1115,6 +1135,7 @@ def _run_phase2_handler_body(
     all_code: dict[str, str] | None = None,
     shared_knowledge: str = "",
     next_team: str = "",
+    sol_arch_handoff: str = "",   # team-specific Sol Arch instruction
 ) -> Phase2StageArtifact:
     """Internal implementation — called after session creds are injected."""
 
@@ -1144,15 +1165,23 @@ def _run_phase2_handler_body(
     # canonical successors); fall back to the canonical value only when all teams run.
     handoff = next_team if next_team else canonical_handoff
 
-    # 2. Build effective requirement — prepend upstream knowledge so every team
-    #    can see and build on what Sol Arch, BA, PM etc. decided before them.
+    # 2. Build effective requirement — prepend Sol Arch’s team-specific handoff
+    #    (if available) THEN the accumulated upstream knowledge so every team
+    #    gets clear, targeted instructions rather than a generic broadcast.
     effective_req = requirement
+    if sol_arch_handoff:
+        effective_req = (
+            f"=== INSTRUCTIONS FROM SOLUTION ARCHITECT FOR {team.upper().replace('_', ' ')} ===\n"
+            + sol_arch_handoff
+            + "\n=== END SOL ARCH INSTRUCTIONS ===\n\n"
+            + effective_req
+        )
     if shared_knowledge:
         effective_req = (
             "=== KEY DECISIONS FROM UPSTREAM TEAMS (read carefully — build on this) ===\n"
             + shared_knowledge
             + "\n=== END UPSTREAM DECISIONS ===\n\n"
-            + requirement
+            + effective_req
         )
 
     # 3. LLM generation (best-effort)
@@ -1375,4 +1404,6 @@ def _run_phase2_handler_body(
         block_tool=_block_tool,
         block_reason=_block_reason,
         autofix_applied=_autofix_applied,
+        # Populate per-team handoffs only for solution_arch
+        sol_arch_handoffs=gen_data.get("handoff_data", {}) if team == "solution_arch" else {},
     )

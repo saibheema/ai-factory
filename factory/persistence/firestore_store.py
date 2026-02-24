@@ -206,6 +206,36 @@ class FirestoreStore:
             }
         )
 
+    # ── Task Routing (cross-instance task lookup) ────────────────────────
+    def save_task_routing(self, task_id: str, uid: str, project_id: str) -> None:
+        """Register task→user mapping so any Cloud Run instance can find the run."""
+        ref = self.db.collection("task_routing").document(task_id)
+        ref.set({"uid": uid, "project_id": project_id, "updated_at": self._now()}, merge=True)
+
+    def get_task_routing(self, task_id: str) -> dict | None:
+        """Return {uid, project_id} for a task, or None if not found."""
+        ref = self.db.collection("task_routing").document(task_id)
+        doc = ref.get()
+        return doc.to_dict() if doc.exists else None
+
+    def push_task_comms(self, task_id: str, event: dict) -> None:
+        """Atomically append a comms event to the task routing doc.
+
+        Comms are stored as an array in ``task_routing/{task_id}.comms``.
+        This keeps read and write cheap (single document) and survives Cloud Run
+        instance routing — any instance can read the full log.
+        """
+        ref = self.db.collection("task_routing").document(task_id)
+        ref.set({"comms": firestore.ArrayUnion([event])}, merge=True)
+
+    def get_task_comms(self, task_id: str) -> list:
+        """Return all persisted comms events for a task (ordered by insertion)."""
+        ref = self.db.collection("task_routing").document(task_id)
+        doc = ref.get()
+        if not doc.exists:
+            return []
+        return doc.to_dict().get("comms", [])
+
     def list_decisions(
         self,
         uid: str,

@@ -267,7 +267,11 @@ _comms_logs_lock = threading.Lock()
 
 
 def _push_comms(task_id: str, from_team: str, to_team: str, msg_type: str, message: str) -> None:
-    """Append a team-to-team communication event to the task comms log."""
+    """Append a team-to-team communication event to the task comms log.
+
+    Events are stored both in-memory (for the current instance) and in Firestore
+    (so any Cloud Run instance can serve them via the /comms polling endpoint).
+    """
     entry = {
         "ts": datetime.now(UTC).isoformat(),
         "type": msg_type,        # "handoff" | "context" | "clarification" | "status"
@@ -277,6 +281,18 @@ def _push_comms(task_id: str, from_team: str, to_team: str, msg_type: str, messa
     }
     with _comms_logs_lock:
         _comms_logs[task_id].append(entry)
+    # Persist to Firestore asynchronously so it's visible across instances
+    def _persist() -> None:
+        try:
+            _get_firestore().push_task_comms(task_id, entry)
+        except Exception as _pe:
+            log.debug("Comms Firestore persist failed for %s: %s", task_id, _pe)
+    threading.Thread(target=_persist, daemon=True).start()
+
+
+# In-process index: task_id → {uid, project_id} — allows same-instance Firestore fallback
+_task_meta_index: dict[str, dict] = {}
+_task_meta_lock = threading.Lock()
 
 
 def _task_store_save(
@@ -285,8 +301,12 @@ def _task_store_save(
     with task_runs_lock:
         task_runs[task_id] = payload
     if uid and project_id:
+        with _task_meta_lock:
+            _task_meta_index[task_id] = {"uid": uid, "project_id": project_id}
         try:
-            _get_firestore().save_run(uid, project_id, task_id, payload)
+            fs = _get_firestore()
+            fs.save_run(uid, project_id, task_id, payload)
+            fs.save_task_routing(task_id, uid, project_id)  # cross-instance lookup
         except Exception:
             log.warning("Firestore save failed for run %s", task_id)
 
@@ -294,7 +314,31 @@ def _task_store_save(
 def _task_store_load(task_id: str) -> dict | None:
     with task_runs_lock:
         local = task_runs.get(task_id)
-    return local
+    if local is not None:
+        return local
+    # ── Firestore fallback for cross-instance resilience ──────────────────
+    # If the pipeline ran on a different Cloud Run instance, task_runs is empty
+    # here.  Use the task_routing doc to find uid/project_id then load the run.
+    try:
+        fs = _get_firestore()
+        # First check the in-process meta index (same-instance cache miss)
+        with _task_meta_lock:
+            meta = _task_meta_index.get(task_id)
+        if meta is None:
+            routing = fs.get_task_routing(task_id)
+            if routing:
+                meta = {"uid": routing["uid"], "project_id": routing["project_id"]}
+                with _task_meta_lock:
+                    _task_meta_index[task_id] = meta
+        if meta:
+            run = fs.get_run(meta["uid"], meta["project_id"], task_id)
+            if run:
+                with task_runs_lock:  # warm the local cache
+                    task_runs[task_id] = run
+                return run
+    except Exception as _e:
+        log.debug("Firestore task load fallback failed for %s: %s", task_id, _e)
+    return None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -574,6 +618,9 @@ def _run_full_pipeline_tracked(
         "backend_eng", "database_eng", "frontend_eng", "devops", "qa_eng",
     })
     shared_knowledge_parts: list[str] = []
+    # Sol Arch per-team handoffs — populated when solution_arch runs.
+    # Maps team slug → specific instruction extracted from HANDOFF_* LLM sections.
+    _sol_arch_handoffs: dict[str, str] = {}
 
     # Announce pipeline start in comms log
     _push_comms(task_id, "orchestrator", teams[0] if teams else "none", "status",
@@ -619,6 +666,7 @@ def _run_full_pipeline_tracked(
                 shared_knowledge="\n\n".join(shared_knowledge_parts),
                 next_team=teams[idx + 1] if idx + 1 < len(teams) else "none",
                 session_creds=_screds or None,
+                sol_arch_handoff=_sol_arch_handoffs.get(team, ""),
             )
 
             # ── Hard-block: pause pipeline, wait for user input, then retry once ────
@@ -684,6 +732,7 @@ def _run_full_pipeline_tracked(
                     shared_knowledge="\n\n".join(shared_knowledge_parts),
                     next_team=teams[idx + 1] if idx + 1 < len(teams) else "none",
                     session_creds=_screds or None,
+                    sol_arch_handoff=_sol_arch_handoffs.get(team, ""),
                 )
 
                 if stage.blocked:
@@ -717,6 +766,20 @@ def _run_full_pipeline_tracked(
                 if team not in all_code_files:
                     all_code_files[team] = {}
                 all_code_files[team].update(stage.code_files)  # new files override, old files kept
+
+            # ── Capture Sol Arch per-team handoffs ───────────────────────────
+            # After solution_arch runs, harvest its per-team handoff instructions.
+            # These get passed specifically to each downstream team (not broadcast).
+            if team == "solution_arch" and stage.sol_arch_handoffs:
+                _sol_arch_handoffs.update(stage.sol_arch_handoffs)
+                log.info("Sol Arch handoffs captured for teams: %s", list(_sol_arch_handoffs.keys()))
+                # Emit one comms event per downstream team to show what Sol Arch said
+                for _target_team, _handoff_msg in stage.sol_arch_handoffs.items():
+                    if _handoff_msg and _target_team in teams:
+                        _push_comms(
+                            task_id, "solution_arch", _target_team, "handoff",
+                            f"📋 Sol Arch → {_target_team.replace('_',' ').title()}: {_handoff_msg[:400]}"
+                        )
 
             # Capture QA validation results
             if team == "qa_eng" and stage.qa_verdict:
@@ -1364,6 +1427,16 @@ def get_task_comms(
     """
     with _comms_logs_lock:
         all_events = list(_comms_logs.get(task_id, []))
+    # ── Firestore fallback: if in-memory is empty this may be a different instance ──
+    if not all_events:
+        try:
+            fs_events = _get_firestore().get_task_comms(task_id)
+            if fs_events:
+                all_events = fs_events
+                with _comms_logs_lock:  # warm in-memory cache for next poll
+                    _comms_logs[task_id] = list(fs_events)
+        except Exception as _ce:
+            log.debug("Comms Firestore fallback failed for %s: %s", task_id, _ce)
     task = _task_store_load(task_id)
     return {
         "task_id": task_id,
@@ -1791,8 +1864,8 @@ def project_group_chat(
         participants = body.participants or phase2_pipeline.teams[:5]
 
     # ── Build rich per-team context from persisted memory ─────────────────
-    # Fetch up to 10 memory items per team (500 chars each) so reopened
-    # projects have full context about their prior work on this project.
+    # Keep context lean: 3 items × 300 chars per team to avoid huge responses
+    # that crash the frontend.  A2A discussion quality > raw context volume.
     team_contexts: dict[str, str] = {}
     try:
         snapshot = _get_firestore().memory_snapshot(user.uid, project_id)
@@ -1803,36 +1876,37 @@ def project_group_chat(
         relevant = [
             i for i in bank_items
             if isinstance(i, str) and i.startswith(f"{project_id}:")
-        ][:10]
+        ][:3]  # max 3 items — keeps prompt small
         if relevant:
-            team_contexts[p] = "\n".join(r.split(":", 1)[-1][:500] for r in relevant)
+            team_contexts[p] = "\n".join(r.split(":", 1)[-1][:300] for r in relevant)
 
     # Last pipeline requirement gives shared context about what was built
     last_requirement = ""
     try:
         runs = _get_firestore().list_runs(user.uid, project_id, limit=1)
         if runs:
-            last_requirement = runs[0].get("requirement", "")[:400]
+            last_requirement = runs[0].get("requirement", "")[:200]
     except Exception:
         pass
 
+    # Truncate full_context to 1 000 chars so it fits comfortably in every prompt
     full_context = (
-        (f"Last pipeline requirement: {last_requirement}\n\n" if last_requirement else "")
+        (f"Last pipeline: {last_requirement}\n" if last_requirement else "")
         + "\n".join(
-            f"[{p}] Prior work:\n{team_contexts[p]}"
+            f"[{p}]: {team_contexts[p][:200]}"
             for p in participants if p in team_contexts
         )
-    )
+    )[:1000]
 
     # ── Try the dedicated groupchat service (proper multi-turn A2A) ────────
     try:
-        with httpx.Client(timeout=120.0) as client:
+        with httpx.Client(timeout=45.0) as client:
             resp = client.post(
                 f"{groupchat_service_url}/session/discuss",
                 json={
                     "topic": body.topic,
                     "participants": participants,
-                    "max_turns": body.max_turns,
+                    "max_turns": min(body.max_turns, 2),  # cap turns for speed
                     "context": full_context,
                 },
             )
@@ -1851,43 +1925,40 @@ def project_group_chat(
     except Exception as _gc_exc:
         log.warning("Groupchat service unavailable — using inline A2A LLM: %s", _gc_exc)
 
-    # ── Fallback: inline A2A LLM with full prior-turn + per-team context ──
-    plan = ["align-on-goal", "split-by-team", "collect-findings", "decide-next-actions"]
+    # ── Fallback: inline A2A LLM — single turn, parallel-ish, capped at 5 teams ──
+    # Limit participants to avoid a cascade of LLM calls that exceeds 60 s timeout.
+    participants = participants[:5]
     discussion: list[dict] = []
 
-    for _turn in range(max(1, body.max_turns)):
-        for p in participants:
-            prior_lines = "\n".join(
-                f"  {d['team'].replace('_',' ')}: {d['message'][:250]}"
-                for d in discussion[-6:]
-            )
-            team_mem = team_contexts.get(p, "")
-            prompt = (
-                f"You are the {p.replace('_', ' ')} team lead answering on project '{project_id}'.\n"
-                + (f"Topic / question: {body.topic}\n" if not mentioned
-                   else f"You were directly asked (@{p}): {body.topic}\n")
-                + (f"\nYour prior work on this project:\n{team_mem[:800]}\n" if team_mem else "")
-                + (f"\nProject context:\n{full_context[:400]}\n" if full_context else "")
-                + (
-                    f"\nDiscussion so far:\n{prior_lines}\n\n"
-                    if prior_lines else "\nYou are the first to speak.\n\n"
-                )
-                + "Respond in 2-4 sentences. Be direct, technical, and reference your project work."
-            )
-            try:
-                result = llm_runtime.generate(team=p, requirement=prompt, prior_count=0, handoff_to="none")
-                content = (result.content.strip() if result and result.content
-                           else f"[{p.replace('_',' ')}] Reviewing '{body.topic}' — will align with team.")
-                source = result.source if result else "fallback"
-            except Exception:
-                content = f"[{p.replace('_',' ')}] Reviewing '{body.topic}' — will align with team."
-                source = "fallback"
-            discussion.append({
-                "round": _turn + 1,
-                "team": p,
-                "message": content,
-                "source": source,
-            })
+    for p in participants:
+        prior_lines = "\n".join(
+            f"  {d['team'].replace('_',' ')}: {d['message'][:150]}"
+            for d in discussion[-4:]
+        )
+        team_mem = team_contexts.get(p, "")
+        prompt = (
+            f"You are the {p.replace('_', ' ')} team lead on project '{project_id}'.\n"
+            + (f"You were directly asked (@{p}): {body.topic}\n" if mentioned
+               else f"Topic: {body.topic}\n")
+            + (f"Your prior work: {team_mem[:300]}\n" if team_mem else "")
+            + (f"Context: {full_context[:300]}\n" if full_context else "")
+            + (f"Discussion so far:\n{prior_lines}\n" if prior_lines else "")
+            + "Respond in 2-3 sentences. Be direct and technical."
+        )
+        try:
+            result = llm_runtime.generate(team=p, requirement=prompt, prior_count=0, handoff_to="none")
+            content = (result.content.strip()[:600] if result and result.content
+                       else f"[{p.replace('_',' ')}] Reviewing '{body.topic[:60]}' — will align.")
+            source = result.source if result else "fallback"
+        except Exception:
+            content = f"[{p.replace('_',' ')}] Reviewing '{body.topic[:60]}' — will align with team."
+            source = "fallback"
+        discussion.append({
+            "round": 1,
+            "team": p,
+            "message": content,
+            "source": source,
+        })
 
     # ── Consensus synthesis via solution_arch ─────────────────────────────
     consensus = f"Teams reached consensus on: {body.topic}"
